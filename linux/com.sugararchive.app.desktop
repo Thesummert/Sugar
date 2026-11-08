@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Sugar Archive
+GenericName=Archive Manager
+GenericName[zh_CN]=压缩包管理器
+Comment=Browse, create and extract archives
+Comment[zh_CN]=浏览、创建和解压压缩包
+Exec=sugar-archive %f
+TryExec=sugar-archive
+Icon=package-x-generic
+Terminal=false
+Categories=Utility;Archiving;Compression;
+Keywords=archive;zip;7z;tar;extract;compress;
+Keywords[zh_CN]=压缩包;压缩;解压;归档;
+MimeType=application/zip;application/x-7z-compressed;application/x-tar;application/x-compressed-tar;application/x-bzip2-compressed-tar;application/x-bzip-compressed-tar;application/x-xz-compressed-tar;

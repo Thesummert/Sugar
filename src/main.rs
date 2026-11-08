@@ -1445,6 +1445,16 @@ fn main() -> Result<()> {
             });
         });
     }
+    // Desktop launchers pass a local archive path through their %f field code.
+    if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) {
+        run_job(
+            &ui,
+            current,
+            "正在打开压缩包…",
+            "压缩包已打开",
+            move || read_archive(&path).map(Some),
+        );
+    }
     ui.run()?;
     Ok(())
 }
