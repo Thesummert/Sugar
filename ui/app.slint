@@ -1,0 +1,134 @@
+import { ListView } from "std-widgets.slint";
+
+export struct ArchiveEntry {
+    name: string,
+    path: string,
+    directory: bool,
+    kind: string,
+    size: string,
+    compressed: string,
+}
+export struct TreeEntry { name: string, path: string, depth: int }
+
+component ActionButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    in property <color> fg;
+    in property <color> surface;
+    callback clicked();
+    height: 38px;
+    border-radius: 8px;
+    background: !enabled ? surface : primary ? #7057f5 : touch.has-hover ? surface.brighter(0.08) : surface;
+    Text { text: root.label; color: root.primary && root.enabled ? white : root.fg; opacity: root.enabled ? 1 : 0.4; font-size: 13px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+export component AppWindow inherits Window {
+    title: "Sugar Archive";
+    preferred-width: 1080px;
+    preferred-height: 700px;
+    min-width: 760px;
+    min-height: 500px;
+    in-out property <bool> dark: false;
+    in-out property <string> archive-name: "尚未打开压缩包";
+    in-out property <string> current-directory: "";
+    in-out property <string> status: "准备就绪";
+    in-out property <bool> has-archive: false;
+    in-out property <bool> busy: false;
+    in-out property <[ArchiveEntry]> entries: [];
+    in-out property <[TreeEntry]> tree: [];
+    callback open-archive();
+    callback create-archive();
+    callback add-files();
+    callback extract-archive();
+    callback navigate(string);
+    callback navigate-parent();
+    property <color> bg: dark ? #11121a : #f5f9fc;
+    property <color> panel: dark ? #1a1b26 : #ffffff;
+    property <color> line: dark ? #2c2d3a : #ececf3;
+    property <color> text-main: dark ? #f2f1fa : #262537;
+    property <color> muted: dark ? #9292a6 : #9191a3;
+    property <color> soft: dark ? #272735 : #f3f2f9;
+    property <color> selected: dark ? #302a4d : #f0edff;
+    background: bg;
+    HorizontalLayout {
+        spacing: 0px;
+        Rectangle {
+            width: 235px;
+            background: root.panel;
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+                HorizontalLayout {
+                    height: 42px; spacing: 10px;
+                    Rectangle { width: 38px; height: 38px; border-radius: 11px; background: #7057f5; Text { text: "S"; color: white; font-size: 21px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; } }
+                    VerticalLayout { spacing: 0px; Text { text: "SUGAR"; color: root.text-main; font-size: 14px; font-weight: 800; } Text { text: "ARCHIVE"; color: root.muted; font-size: 10px; letter-spacing: 1px; } }
+                }
+                Rectangle { height: 12px; }
+                Text { text: "压缩包目录"; color: root.muted; font-size: 11px; font-weight: 700; height: 22px; }
+                if root.has-archive : Rectangle {
+                    height: 38px; border-radius: 7px;
+                    background: root.current-directory == "" ? root.selected : root-touch.has-hover ? root.soft : transparent;
+                    Text { x: 10px; width: parent.width - 20px; height: parent.height; text: "▣  " + root.archive-name; color: root.current-directory == "" ? #8069f8 : root.text-main; font-size: 12px; font-weight: 600; overflow: elide; vertical-alignment: center; }
+                    root-touch := TouchArea { clicked => { root.navigate(""); } }
+                }
+                if !root.has-archive : Text { text: "打开压缩包后显示目录"; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                ListView {
+                    vertical-stretch: 1;
+                    content-width: self.width;
+                    for folder in root.tree : Rectangle {
+                        height: 34px; border-radius: 7px;
+                        background: root.current-directory == folder.path ? root.selected : folder-touch.has-hover ? root.soft : transparent;
+                        Text { x: min(10px + folder.depth * 14px, parent.width - 30px); width: parent.width - self.x - 8px; height: parent.height; text: "▸  " + folder.name; color: root.current-directory == folder.path ? #8069f8 : root.text-main; font-size: 12px; overflow: elide; vertical-alignment: center; }
+                        folder-touch := TouchArea { clicked => { root.navigate(folder.path); } }
+                    }
+                }
+                Rectangle { height: 1px; background: root.line; }
+                ActionButton { label: root.dark ? "☀  切换至亮色" : "☾  切换至暗色"; fg: root.text-main; surface: root.soft; clicked => { root.dark = !root.dark; } }
+            }
+        }
+        VerticalLayout {
+            padding: 24px; spacing: 16px;
+            HorizontalLayout {
+                height: 42px; spacing: 9px;
+                ActionButton { width: 104px; label: "↗  打开文件"; enabled: !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.open-archive(); } }
+                ActionButton { width: 104px; label: "＋  新建"; enabled: !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.create-archive(); } }
+                Rectangle { width: 1px; background: root.line; }
+                ActionButton { width: 104px; label: "＋  添加文件"; enabled: root.has-archive && !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.add-files(); } }
+                ActionButton { width: 104px; label: "↓  解压全部"; enabled: root.has-archive && !root.busy; primary: true; fg: root.text-main; surface: root.soft; clicked => { root.extract-archive(); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Rectangle {
+                vertical-stretch: 1; border-radius: 12px; background: root.panel;
+                VerticalLayout {
+                    spacing: 0px;
+                    HorizontalLayout {
+                        height: 60px; padding-left: 20px; padding-right: 20px; spacing: 12px;
+                        VerticalLayout {
+                            width: 56px; alignment: center;
+                            ActionButton { label: "← 返回"; enabled: root.has-archive && root.current-directory != ""; fg: root.text-main; surface: root.soft; clicked => { root.navigate-parent(); } }
+                        }
+                        Text { text: root.has-archive ? "根目录 / " + root.current-directory : "压缩包内容"; color: root.text-main; font-size: 13px; font-weight: 700; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                        Text { text: root.has-archive ? root.entries.length + " 个项目" : ""; color: root.muted; font-size: 11px; vertical-alignment: center; }
+                    }
+                    Rectangle { height: 1px; background: root.line; }
+                    HorizontalLayout { height: 40px; padding-left: 22px; padding-right: 22px; Text { text: "名称"; color: root.muted; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; } Text { text: "类型"; color: root.muted; font-size: 11px; width: 90px; vertical-alignment: center; } Text { text: "大小"; color: root.muted; font-size: 11px; width: 90px; vertical-alignment: center; } Text { text: "压缩后"; color: root.muted; font-size: 11px; width: 90px; vertical-alignment: center; } }
+                    Rectangle { height: 1px; background: root.line; }
+                    if root.entries.length == 0 : Rectangle { vertical-stretch: 1; VerticalLayout { alignment: center; spacing: 10px; Text { text: "▤"; color: #a89bf5; font-size: 42px; horizontal-alignment: center; } Text { text: root.has-archive ? "此文件夹为空" : "开始管理你的文件"; color: root.text-main; font-size: 15px; font-weight: 700; horizontal-alignment: center; } Text { text: root.has-archive ? "点击上方按钮添加文件" : "打开或新建一个 ZIP 压缩包"; color: root.muted; font-size: 12px; horizontal-alignment: center; } } }
+                    if root.entries.length > 0 : ListView {
+                        vertical-stretch: 1; content-width: self.width;
+                        for entry in root.entries : Rectangle {
+                            height: 48px;
+                            background: row-touch.has-hover && entry.directory ? root.soft : transparent;
+                            HorizontalLayout { padding-left: 22px; padding-right: 22px; spacing: 0px; Text { text: (entry.directory ? "▸  " : "▧  ") + entry.name; color: root.text-main; font-size: 12px; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; } Text { text: entry.kind; color: root.muted; font-size: 12px; width: 90px; vertical-alignment: center; } Text { text: entry.size; color: root.muted; font-size: 12px; width: 90px; vertical-alignment: center; } Text { text: entry.compressed; color: root.muted; font-size: 12px; width: 90px; vertical-alignment: center; } }
+                            Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: root.line; }
+                            row-touch := TouchArea { enabled: entry.directory; clicked => { root.navigate(entry.path); } }
+                        }
+                    }
+                }
+            }
+            HorizontalLayout { height: 18px; Text { text: "●  " + root.status; color: root.muted; font-size: 11px; } Rectangle { horizontal-stretch: 1; } Text { text: "ZIP ARCHIVE MANAGER"; color: root.muted; font-size: 10px; } }
+        }
+    }
+}
