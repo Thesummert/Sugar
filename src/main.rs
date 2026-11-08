@@ -27,6 +27,30 @@ fn size(bytes: u64) -> String {
     unreachable!()
 }
 
+fn file_icon(name: &str, directory: bool) -> &'static str {
+    if directory {
+        return "folder";
+    }
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "svg" | "ico" | "heic" => "image",
+        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
+        "mp4" | "mov" | "mkv" | "avi" | "webm" | "m4v" => "video",
+        "zip" | "7z" | "rar" | "tar" | "gz" | "bz2" | "xz" | "tgz" | "tbz" | "tbz2" | "txz" => {
+            "archive"
+        }
+        "rs" | "c" | "h" | "cpp" | "hpp" | "py" | "js" | "ts" | "jsx" | "tsx" | "html" | "css"
+        | "json" | "toml" | "yaml" | "yml" | "xml" | "sh" | "java" | "go" => "code",
+        "pdf" | "doc" | "docx" | "odt" | "rtf" | "txt" | "md" | "xls" | "xlsx" | "csv" | "ppt"
+        | "pptx" => "document",
+        _ => "file",
+    }
+}
+
 // Some ZIP producers store UTF-8 names without setting the UTF-8 flag.
 // Keep the ZIP library's decoded name for byte sequences that are not UTF-8.
 fn decoded_name<'a>(raw: &'a [u8], fallback: &'a str) -> Cow<'a, str> {
@@ -78,6 +102,7 @@ impl Model for EntryModel {
                 name: entry.name.as_str().into(),
                 path: entry.path.as_str().into(),
                 directory: entry.directory,
+                icon: file_icon(&entry.name, entry.directory).into(),
                 kind: if entry.directory {
                     "文件夹"
                 } else {
@@ -533,6 +558,35 @@ fn extract_archive(path: &Path, destination: &Path) -> Result<()> {
     extract_selection(path, destination, None)
 }
 
+fn extract_temporary_file(archive: &Path, selection: &str) -> Result<(tempfile::TempDir, PathBuf)> {
+    if selection.is_empty() || selection.ends_with('/') {
+        bail!("请选择文件");
+    }
+    let name = Path::new(selection).file_name().context("文件名无效")?;
+    let directory = tempfile::Builder::new().prefix("sugar-open-").tempdir()?;
+    extract_selection(archive, directory.path(), Some(selection))?;
+    let file = directory.path().join(name);
+    Ok((directory, file))
+}
+
+fn open_with_default_app(path: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = std::process::Command::new("xdg-open");
+    let status = command.arg(path).status().context("无法启动默认程序")?;
+    if !status.success() {
+        bail!("无法使用默认程序打开文件");
+    }
+    Ok(())
+}
+
 // A selected directory retains its own name, but drops its parents in the archive.
 fn extract_selection(path: &Path, destination: &Path, selection: Option<&str>) -> Result<()> {
     let format = ArchiveFormat::detect(path)?;
@@ -726,6 +780,7 @@ fn prepare_destination(destination: &Path, extra: Option<&str>) -> Result<PathBu
 fn main() -> Result<()> {
     let ui = AppWindow::new()?;
     let current = Arc::new(Mutex::new(None::<Arc<ArchiveData>>));
+    let temporary_files = Arc::new(Mutex::new(Vec::<tempfile::TempDir>::new()));
     {
         let weak = ui.as_weak();
         let current = current.clone();
@@ -860,6 +915,46 @@ fn main() -> Result<()> {
     {
         let weak = ui.as_weak();
         let current = current.clone();
+        let temporary_files = temporary_files.clone();
+        ui.on_open_item(move |item| {
+            let ui = weak.unwrap();
+            if ui.get_busy() {
+                return;
+            }
+            let Some(archive) = current.lock().unwrap().clone() else {
+                return;
+            };
+            let item = item.to_string();
+            let directory = ui.get_current_directory().to_string();
+            if !archive.directories.get(&directory).is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry.path == item && !entry.directory)
+            }) {
+                return;
+            }
+            let path = archive.path.clone();
+            let temporary_files = temporary_files.clone();
+            ui.set_busy(true);
+            ui.set_status("正在打开文件…".into());
+            let weak = ui.as_weak();
+            thread::spawn(move || {
+                let result = (|| {
+                    let (directory, file) = extract_temporary_file(&path, &item)?;
+                    open_with_default_app(&file)?;
+                    temporary_files.lock().unwrap().push(directory);
+                    Ok(())
+                })();
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_busy(false);
+                    report(&ui, result, "文件已打开");
+                });
+            });
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let current = current.clone();
         ui.on_extract_item(move |item| {
             let ui = weak.unwrap();
             if item.is_empty() || item != ui.get_selected_entry() || ui.get_busy() {
@@ -929,6 +1024,45 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_icons_follow_extension_and_directory() {
+        for (name, directory, expected) in [
+            ("photos.jpg", true, "folder"),
+            ("PHOTO.JPEG", false, "image"),
+            ("song.mp3", false, "audio"),
+            ("movie.mp4", false, "video"),
+            ("backup.tar.gz", false, "archive"),
+            ("main.rs", false, "code"),
+            ("report.pdf", false, "document"),
+            ("README", false, "file"),
+            (".gitignore", false, "file"),
+            ("unknown.xyz", false, "file"),
+        ] {
+            assert_eq!(file_icon(name, directory), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn opens_selected_file_in_its_own_temporary_directory() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let archive = dir.path().join("files.zip");
+        let mut writer = ZipWriter::new(File::create(&archive)?);
+        for name in ["folder/file.txt", "folder/other.txt"] {
+            writer.start_file(name, SimpleFileOptions::default())?;
+            std::io::Write::write_all(&mut writer, name.as_bytes())?;
+        }
+        writer.finish()?;
+        let (temporary, file) = extract_temporary_file(&archive, "folder/file.txt")?;
+        assert_eq!(file, temporary.path().join("file.txt"));
+        assert_eq!(fs::read(&file)?, b"folder/file.txt");
+        assert_eq!(fs::read_dir(temporary.path())?.count(), 1);
+        assert!(extract_temporary_file(&archive, "folder/").is_err());
+        assert!(extract_temporary_file(&archive, "missing.txt").is_err());
+        drop(temporary);
+        assert!(!file.exists());
+        Ok(())
+    }
 
     #[test]
     fn prepare_extra_extraction_folder() -> Result<()> {

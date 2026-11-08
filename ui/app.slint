@@ -4,6 +4,7 @@ export struct ArchiveEntry {
     name: string,
     path: string,
     directory: bool,
+    icon: string,
     kind: string,
     size: string,
     compressed: string,
@@ -22,6 +23,22 @@ component ActionButton inherits Rectangle {
     background: !enabled ? surface : primary ? #7057f5 : touch.has-hover ? surface.brighter(0.08) : surface;
     Text { text: root.label; color: root.primary && root.enabled ? white : root.fg; opacity: root.enabled ? 1 : 0.4; font-size: 13px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
     touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+component FileIcon inherits Rectangle {
+    in property <string> kind;
+    width: 30px;
+    height: 30px;
+    border-radius: 7px;
+    background: kind == "folder" ? #fff1ce : kind == "image" ? #e8f5ed : kind == "audio" ? #fceaf2 : kind == "video" ? #fcefe7 : kind == "archive" ? #f1ebff : kind == "code" ? #e7f3fa : kind == "document" ? #e9efff : #eff0f4;
+    Text {
+        text: root.kind == "folder" ? "▰" : root.kind == "image" ? "图" : root.kind == "audio" ? "♫" : root.kind == "video" ? "▶" : root.kind == "archive" ? "▣" : root.kind == "code" ? "</>" : root.kind == "document" ? "文" : "▤";
+        color: root.kind == "folder" ? #bd841e : root.kind == "image" ? #348b5a : root.kind == "audio" ? #bd5284 : root.kind == "video" ? #c56e3c : root.kind == "archive" ? #795ac8 : root.kind == "code" ? #3183a8 : root.kind == "document" ? #5875bc : #777d8c;
+        font-size: root.kind == "code" ? 10px : 15px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
 }
 
 export component AppWindow inherits Window {
@@ -50,6 +67,7 @@ export component AppWindow inherits Window {
     callback add-files();
     callback extract-archive();
     callback extract-item(string);
+    callback open-item(string);
     callback choose-destination();
     callback confirm-extract();
     callback navigate(string);
@@ -134,11 +152,16 @@ export component AppWindow inherits Window {
                             background: root.selected-entry == entry.path ? root.selected : row-touch.has-hover ? root.soft : transparent;
                             row-touch := TouchArea {
                                 clicked => { root.selected-entry = entry.path; }
-                                double-clicked => { if entry.directory { root.navigate(entry.path); } }
+                                double-clicked => { if entry.directory { root.navigate(entry.path); } else { root.open-item(entry.path); } }
                             }
                             HorizontalLayout {
                                 padding-left: 22px; padding-right: 22px; spacing: 0px;
-                                Text { text: (entry.directory ? "▸  " : "▧  ") + entry.name; color: root.text-main; font-size: 12px; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
+                                Rectangle {
+                                    width: 30px;
+                                    FileIcon { y: (parent.height - self.height) / 2; kind: entry.icon; }
+                                }
+                                Rectangle { width: 10px; }
+                                Text { text: entry.name; color: root.text-main; font-size: 12px; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
                                 Text { text: entry.kind; color: root.muted; font-size: 12px; width: 75px; vertical-alignment: center; }
                                 Text { text: entry.size; color: root.muted; font-size: 12px; width: 75px; vertical-alignment: center; }
                                 Text { text: entry.compressed; color: root.muted; font-size: 12px; width: 75px; vertical-alignment: center; }
