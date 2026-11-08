@@ -6,9 +6,14 @@ build = "build.rs"
 
 [dependencies]
 anyhow = "1"
+bzip2 = "0.5"
+flate2 = "1"
 rfd = "0.15"
+sevenz-rust2 = "0.20"
 slint = "1.18"
+tar = "0.4"
 tempfile = "3"
+xz2 = "0.1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
