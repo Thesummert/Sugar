@@ -56,6 +56,11 @@ export component AppWindow inherits Window {
     in-out property <bool> busy: false;
     in-out property <bool> can-add: false;
     in-out property <bool> extract-dialog-open: false;
+    in-out property <bool> appearance-dialog-open: false;
+    in-out property <bool> progress-dialog-open: false;
+    in-out property <float> extract-progress: 0;
+    in-out property <string> extract-progress-text: "正在准备…";
+    in-out property <string> extract-remaining: "预计剩余时间：计算中…";
     in-out property <string> extract-destination: "";
     in-out property <string> extract-item-path: "";
     in-out property <string> extra-folder-name: "";
@@ -80,6 +85,16 @@ export component AppWindow inherits Window {
     property <color> soft: dark ? #272735 : #f3f2f9;
     property <color> selected: dark ? #302a4d : #f0edff;
     background: bg;
+    MenuBar {
+        Menu {
+            title: "设置";
+            MenuItem {
+                title: "外观…";
+                enabled: !root.busy && !root.extract-dialog-open && !root.appearance-dialog-open;
+                activated => { root.appearance-dialog-open = true; }
+            }
+        }
+    }
     HorizontalLayout {
         spacing: 0px;
         Rectangle {
@@ -112,8 +127,6 @@ export component AppWindow inherits Window {
                         folder-touch := TouchArea { clicked => { root.navigate(folder.path); } }
                     }
                 }
-                Rectangle { height: 1px; background: root.line; }
-                ActionButton { label: root.dark ? "☀  切换至亮色" : "☾  切换至暗色"; fg: root.text-main; surface: root.soft; clicked => { root.dark = !root.dark; } }
             }
         }
         VerticalLayout {
@@ -174,6 +187,33 @@ export component AppWindow inherits Window {
             HorizontalLayout { height: 18px; Text { text: "●  " + root.status; color: root.muted; font-size: 11px; } Rectangle { horizontal-stretch: 1; } Text { text: "ARCHIVE MANAGER"; color: root.muted; font-size: 10px; } }
         }
     }
+    if root.appearance-dialog-open : Rectangle {
+        width: parent.width; height: parent.height;
+        background: #00000088;
+        TouchArea { }
+        Rectangle {
+            width: min(460px, parent.width - 48px); height: 260px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            border-radius: 14px; background: root.panel;
+            VerticalLayout {
+                padding: 24px; spacing: 12px;
+                Text { text: "设置"; color: root.text-main; font-size: 19px; font-weight: 700; height: 26px; }
+                Text { text: "外观"; color: root.text-main; font-size: 13px; font-weight: 700; height: 20px; }
+                Text { text: "选择应用的颜色模式"; color: root.muted; font-size: 12px; height: 18px; }
+                HorizontalLayout {
+                    height: 42px; spacing: 10px;
+                    ActionButton { label: root.dark ? "亮色" : "✓ 亮色"; primary: !root.dark; fg: root.text-main; surface: root.soft; clicked => { root.dark = false; } }
+                    ActionButton { label: root.dark ? "✓ 暗色" : "暗色"; primary: root.dark; fg: root.text-main; surface: root.soft; clicked => { root.dark = true; } }
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    height: 38px;
+                    Rectangle { horizontal-stretch: 1; }
+                    ActionButton { width: 84px; label: "关闭"; fg: root.text-main; surface: root.soft; clicked => { root.appearance-dialog-open = false; } }
+                }
+            }
+        }
+    }
     if root.extract-dialog-open : Rectangle {
         width: parent.width; height: parent.height;
         background: #00000088;
@@ -208,6 +248,26 @@ export component AppWindow inherits Window {
                     ActionButton { width: 84px; label: "取消"; fg: root.text-main; surface: root.soft; clicked => { root.extract-dialog-open = false; } }
                     ActionButton { width: 100px; label: "开始解压"; primary: true; enabled: root.extract-destination != ""; fg: root.text-main; surface: root.soft; clicked => { root.confirm-extract(); } }
                 }
+            }
+        }
+    }
+    if root.progress-dialog-open : Rectangle {
+        width: parent.width; height: parent.height; background: #00000088;
+        TouchArea { }
+        Rectangle {
+            width: min(460px, parent.width - 48px); height: 190px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            border-radius: 14px; background: root.panel;
+            VerticalLayout {
+                padding: 24px; spacing: 12px;
+                Text { text: "正在解压"; color: root.text-main; font-size: 19px; font-weight: 700; height: 26px; }
+                Text { text: root.extract-progress-text; color: root.muted; font-size: 12px; height: 20px; }
+                Rectangle {
+                    height: 10px; border-radius: 5px; background: root.soft;
+                    Rectangle { width: parent.width * root.extract-progress; height: parent.height; border-radius: 5px; background: #7057f5; }
+                }
+                Text { text: root.extract-remaining; color: root.muted; font-size: 12px; height: 20px; }
+                Rectangle { vertical-stretch: 1; }
             }
         }
     }

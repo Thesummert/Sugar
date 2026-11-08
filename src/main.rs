@@ -8,6 +8,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
@@ -554,6 +555,7 @@ fn write_extracted(target: &Path, directory: bool, reader: &mut dyn Read) -> io:
     Ok(())
 }
 
+#[cfg(test)]
 fn extract_archive(path: &Path, destination: &Path) -> Result<()> {
     extract_selection(path, destination, None)
 }
@@ -589,6 +591,31 @@ fn open_with_default_app(path: &Path) -> Result<()> {
 
 // A selected directory retains its own name, but drops its parents in the archive.
 fn extract_selection(path: &Path, destination: &Path, selection: Option<&str>) -> Result<()> {
+    extract_selection_with_progress(path, destination, selection, &mut |_, _| {})
+}
+
+struct ProgressReader<'a> {
+    reader: &'a mut dyn Read,
+    completed: &'a mut u64,
+    total: u64,
+    progress: &'a mut dyn FnMut(u64, u64),
+}
+
+impl Read for ProgressReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let count = self.reader.read(buffer)?;
+        *self.completed = self.completed.saturating_add(count as u64);
+        (self.progress)(*self.completed, self.total);
+        Ok(count)
+    }
+}
+
+fn extract_selection_with_progress(
+    path: &Path,
+    destination: &Path,
+    selection: Option<&str>,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<()> {
     let format = ArchiveFormat::detect(path)?;
     let files = list_files(path, format)?;
     let parent = selection
@@ -635,6 +662,12 @@ fn extract_selection(path: &Path, destination: &Path, selection: Option<&str>) -
         })
         .collect();
     let checked = validate_targets(&mapped, destination)?;
+    let total = mapped
+        .iter()
+        .filter(|entry| !entry.directory)
+        .fold(0u64, |sum, entry| sum.saturating_add(entry.size));
+    let mut completed = 0u64;
+    progress(0, total);
     let mut targets = vec![None; files.len()];
     for (index, target) in selected.iter().copied().zip(checked) {
         targets[index] = Some(target);
@@ -655,7 +688,17 @@ fn extract_selection(path: &Path, destination: &Path, selection: Option<&str>) -
             }
             for &i in &selected {
                 let mut file = zip.by_index(i)?;
-                write_extracted(targets[i].as_ref().unwrap(), files[i].directory, &mut file)?;
+                let mut reader = ProgressReader {
+                    reader: &mut file,
+                    completed: &mut completed,
+                    total,
+                    progress,
+                };
+                write_extracted(
+                    targets[i].as_ref().unwrap(),
+                    files[i].directory,
+                    &mut reader,
+                )?;
             }
         }
         ArchiveFormat::SevenZip => {
@@ -680,7 +723,13 @@ fn extract_selection(path: &Path, destination: &Path, selection: Option<&str>) -
                     return Err(io::Error::other("压缩包在解压过程中发生变化").into());
                 }
                 if let Some(target) = target {
-                    write_extracted(target, directory, input)?;
+                    let mut reader = ProgressReader {
+                        reader: input,
+                        completed: &mut completed,
+                        total,
+                        progress,
+                    };
+                    write_extracted(target, directory, &mut reader)?;
                 } else {
                     io::copy(input, &mut io::sink())?;
                 }
@@ -708,7 +757,13 @@ fn extract_selection(path: &Path, destination: &Path, selection: Option<&str>) -
                     bail!("压缩包在解压过程中发生变化");
                 }
                 if let Some(target) = &targets[index] {
-                    write_extracted(target, expected.directory, &mut entry)?;
+                    let mut reader = ProgressReader {
+                        reader: &mut entry,
+                        completed: &mut completed,
+                        total,
+                        progress,
+                    };
+                    write_extracted(target, expected.directory, &mut reader)?;
                 }
                 index += 1;
             }
@@ -718,6 +773,28 @@ fn extract_selection(path: &Path, destination: &Path, selection: Option<&str>) -
         }
     }
     Ok(())
+}
+
+fn remaining_time(completed: u64, total: u64, elapsed: Duration) -> String {
+    if completed == 0 || total == 0 || elapsed < Duration::from_secs(1) {
+        return "预计剩余时间：计算中…".into();
+    }
+    if completed >= total {
+        return "预计剩余时间：即将完成".into();
+    }
+    let seconds =
+        ((total - completed) as f64 * elapsed.as_secs_f64() / completed as f64).ceil() as u64;
+    if seconds < 60 {
+        format!("预计剩余时间：{seconds} 秒")
+    } else if seconds < 3600 {
+        format!("预计剩余时间：{} 分 {} 秒", seconds / 60, seconds % 60)
+    } else {
+        format!(
+            "预计剩余时间：{} 小时 {} 分",
+            seconds / 3600,
+            seconds % 3600 / 60
+        )
+    }
 }
 
 fn archive_folder_name(path: &Path) -> String {
@@ -999,22 +1076,62 @@ fn main() -> Result<()> {
             let folder = ui.get_extra_folder_name().to_string();
             let path = archive.path.clone();
             ui.set_extract_dialog_open(false);
-            run_job(
-                &ui,
-                current.clone(),
-                "正在解压文件…",
-                "解压完成",
-                move || {
+            ui.set_busy(true);
+            ui.set_status("正在解压文件…".into());
+            ui.set_extract_progress(0.0);
+            ui.set_extract_progress_text("正在检查压缩包…".into());
+            ui.set_extract_remaining("预计剩余时间：计算中…".into());
+            ui.set_progress_dialog_open(true);
+            let weak = ui.as_weak();
+            thread::spawn(move || {
+                let result = (|| {
                     let destination =
                         prepare_destination(&destination, extra.then_some(folder.as_str()))?;
-                    if item.is_empty() {
-                        extract_archive(&path, &destination)?;
-                    } else {
-                        extract_selection(&path, &destination, Some(&item))?;
-                    }
-                    Ok(None)
-                },
-            );
+                    let started = Instant::now();
+                    let mut last_update = None::<Instant>;
+                    let progress_ui = weak.clone();
+                    extract_selection_with_progress(
+                        &path,
+                        &destination,
+                        (!item.is_empty()).then_some(item.as_str()),
+                        &mut |completed, total| {
+                            let now = Instant::now();
+                            if last_update.is_some_and(|last| {
+                                now.duration_since(last) < Duration::from_millis(150)
+                            }) {
+                                return;
+                            }
+                            last_update = Some(now);
+                            let fraction = if total == 0 {
+                                0.0
+                            } else {
+                                (completed as f64 / total as f64).min(0.99) as f32
+                            };
+                            let label = if total == 0 {
+                                "正在处理空文件和文件夹…".to_owned()
+                            } else {
+                                format!(
+                                    "{} / {}（{}%）",
+                                    size(completed.min(total)),
+                                    size(total),
+                                    (fraction * 100.0) as u32
+                                )
+                            };
+                            let remaining = remaining_time(completed, total, started.elapsed());
+                            let _ = progress_ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_extract_progress(fraction);
+                                ui.set_extract_progress_text(label.into());
+                                ui.set_extract_remaining(remaining.into());
+                            });
+                        },
+                    )
+                })();
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_progress_dialog_open(false);
+                    ui.set_busy(false);
+                    report(&ui, result, "解压完成");
+                });
+            });
         });
     }
     ui.run()?;
@@ -1024,6 +1141,39 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extraction_progress_counts_selected_bytes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let archive = dir.path().join("progress.zip");
+        let mut writer = ZipWriter::new(File::create(&archive)?);
+        writer.start_file("folder/selected.txt", SimpleFileOptions::default())?;
+        std::io::Write::write_all(&mut writer, &vec![42; 100_000])?;
+        writer.start_file("folder/other.txt", SimpleFileOptions::default())?;
+        std::io::Write::write_all(&mut writer, b"other")?;
+        writer.finish()?;
+        let destination = dir.path().join("out");
+        fs::create_dir(&destination)?;
+        let mut updates = Vec::new();
+        extract_selection_with_progress(
+            &archive,
+            &destination,
+            Some("folder/selected.txt"),
+            &mut |done, total| updates.push((done, total)),
+        )?;
+        assert_eq!(updates.first(), Some(&(0, 100_000)));
+        assert_eq!(updates.last(), Some(&(100_000, 100_000)));
+        assert!(updates.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        assert_eq!(
+            remaining_time(0, 100, Duration::from_secs(2)),
+            "预计剩余时间：计算中…"
+        );
+        assert_eq!(
+            remaining_time(50, 100, Duration::from_secs(10)),
+            "预计剩余时间：10 秒"
+        );
+        Ok(())
+    }
 
     #[test]
     fn file_icons_follow_extension_and_directory() {
