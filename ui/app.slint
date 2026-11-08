@@ -1,4 +1,4 @@
-import { ListView, LineEdit } from "std-widgets.slint";
+import { ListView, LineEdit, Palette } from "std-widgets.slint";
 
 export struct ArchiveEntry {
     name: string,
@@ -48,6 +48,8 @@ export component AppWindow inherits Window {
     min-width: 800px;
     min-height: 500px;
     in-out property <bool> dark: false;
+    init => { Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light; }
+    changed dark => { Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light; }
     in-out property <string> archive-name: "尚未打开压缩包";
     in-out property <string> current-directory: "";
     in-out property <string> selected-entry: "";
