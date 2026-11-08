@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+    <key>CFBundleDisplayName</key><string>Sugar Archive</string>
+    <key>CFBundleExecutable</key><string>sugar-archive</string>
+    <key>CFBundleIdentifier</key><string>com.sugararchive.app</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>Sugar Archive</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>10.15</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>ZIP 压缩包</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.zip-archive</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>归档文件</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array>
+                <string>public.tar-archive</string>
+                <string>org.7-zip.7-zip-archive</string>
+                <string>org.gnu.gnu-zip-archive</string>
+                <string>public.bzip2-archive</string>
+                <string>org.tukaani.xz-archive</string>
+                <string>com.sugararchive.compressed-tar</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>org.7-zip.7-zip-archive</string>
+            <key>UTTypeDescription</key><string>7z 压缩包</string>
+            <key>UTTypeConformsTo</key><array><string>public.archive</string></array>
+            <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>7z</string></array></dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.sugararchive.compressed-tar</string>
+            <key>UTTypeDescription</key><string>压缩的 TAR 归档</string>
+            <key>UTTypeConformsTo</key><array><string>public.archive</string></array>
+            <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>tgz</string><string>tbz</string><string>tbz2</string><string>txz</string></array></dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key><string>org.tukaani.xz-archive</string>
+            <key>UTTypeDescription</key><string>XZ 压缩文件</string>
+            <key>UTTypeConformsTo</key><array><string>public.archive</string></array>
+            <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>xz</string></array></dict>
+        </dict>
+    </array>
+</dict>
+</plist>

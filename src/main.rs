@@ -1,11 +1,14 @@
 use anyhow::{bail, Context, Result};
+use slint::winit_030::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker};
 use std::{
     borrow::Cow,
+    cell::RefCell,
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Read},
     path::{Component, Path, PathBuf},
+    rc::Rc,
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -13,6 +16,9 @@ use std::{
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 slint::include_modules!();
+
+#[cfg(target_os = "macos")]
+mod macos;
 
 fn size(bytes: u64) -> String {
     if bytes < 1024 {
@@ -73,6 +79,7 @@ struct EntryData {
 struct ArchiveData {
     path: PathBuf,
     format: ArchiveFormat,
+    staged_sources: Option<Vec<PathBuf>>,
     directories: HashMap<String, Vec<EntryData>>,
     tree: Vec<String>,
 }
@@ -295,6 +302,15 @@ fn list_files(path: &Path, format: ArchiveFormat) -> Result<Vec<FileInfo>> {
 fn read_archive(path: &Path) -> Result<ArchiveData> {
     let format = ArchiveFormat::detect(path)?;
     let files = list_files(path, format)?;
+    Ok(build_archive_data(path.to_owned(), format, files, None))
+}
+
+fn build_archive_data(
+    path: PathBuf,
+    format: ArchiveFormat,
+    files: Vec<FileInfo>,
+    staged_sources: Option<Vec<PathBuf>>,
+) -> ArchiveData {
     let mut directories: HashMap<String, Vec<EntryData>> = HashMap::new();
     let mut tree = BTreeSet::new();
     directories.entry(String::new()).or_default();
@@ -350,12 +366,13 @@ fn read_archive(path: &Path) -> Result<ArchiveData> {
                 .then_with(|| a.name.cmp(&b.name))
         });
     }
-    Ok(ArchiveData {
-        path: path.to_owned(),
+    ArchiveData {
+        path,
         format,
+        staged_sources,
         directories,
         tree: tree.into_iter().collect(),
-    })
+    }
 }
 
 fn show_directory(ui: &AppWindow, archive: Arc<ArchiveData>, directory: &str) {
@@ -372,15 +389,19 @@ fn show_directory(ui: &AppWindow, archive: Arc<ArchiveData>, directory: &str) {
 }
 
 fn show_archive(ui: &AppWindow, archive: Arc<ArchiveData>, preserve_directory: bool) {
-    ui.set_archive_name(
+    let staging = archive.staged_sources.is_some();
+    ui.set_staging(staging);
+    ui.set_archive_name(if staging {
+        "待压缩文件".into()
+    } else {
         archive
             .path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string()
-            .into(),
-    );
+            .into()
+    });
     let directory = if preserve_directory {
         ui.get_current_directory().to_string()
     } else {
@@ -391,7 +412,7 @@ fn show_archive(ui: &AppWindow, archive: Arc<ArchiveData>, preserve_directory: b
         notify: ModelNotify::default(),
     }));
     ui.set_has_archive(true);
-    ui.set_can_add(archive.format == ArchiveFormat::Zip);
+    ui.set_can_add(!staging && archive.format == ArchiveFormat::Zip);
     if archive.directories.contains_key(&directory) {
         show_directory(ui, archive, &directory);
     } else {
@@ -449,6 +470,137 @@ fn create_archive(path: &Path) -> Result<()> {
         .context("无法创建压缩包（文件可能已存在）")?;
     ZipWriter::new(file).finish()?;
     Ok(())
+}
+
+struct SourceEntry {
+    path: PathBuf,
+    name: String,
+    directory: bool,
+    size: u64,
+}
+
+fn collect_archive_inputs(files: &[PathBuf]) -> Result<Vec<SourceEntry>> {
+    if files.is_empty() {
+        bail!("没有要打包的文件");
+    }
+    let mut names = HashSet::new();
+    let mut pending = Vec::new();
+    for file in files {
+        let name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("文件名不是有效的 UTF-8")?;
+        if name.contains('\\') || name == "." || name == ".." {
+            bail!("文件名不适合放入压缩包：{name}");
+        }
+        if !names.insert(name.to_owned()) {
+            bail!("拖入的文件包含重复文件名：{name}");
+        }
+        pending.push((file.clone(), name.to_owned()));
+    }
+    let mut entries = Vec::new();
+    while let Some((path, name)) = pending.pop() {
+        let metadata =
+            fs::symlink_metadata(&path).with_context(|| format!("无法读取 {}", path.display()))?;
+        if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+            bail!("暂不支持符号链接或特殊文件：{}", path.display());
+        }
+        let directory = metadata.is_dir();
+        if directory {
+            for child in
+                fs::read_dir(&path).with_context(|| format!("无法读取文件夹 {}", path.display()))?
+            {
+                let child = child?;
+                let child_name = child
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("文件名不是有效的 UTF-8"))?;
+                if child_name.contains('\\') {
+                    bail!("文件名不适合放入压缩包：{child_name}");
+                }
+                pending.push((child.path(), format!("{name}/{child_name}")));
+            }
+        }
+        entries.push(SourceEntry {
+            path,
+            name: if directory { format!("{name}/") } else { name },
+            directory,
+            size: metadata.len(),
+        });
+    }
+    Ok(entries)
+}
+
+fn stage_archive_inputs(files: Vec<PathBuf>) -> Result<ArchiveData> {
+    let entries = collect_archive_inputs(&files)?;
+    let files_info = entries
+        .into_iter()
+        .map(|entry| FileInfo {
+            name: entry.name,
+            directory: entry.directory,
+            size: entry.size,
+            compressed: None,
+        })
+        .collect();
+    Ok(build_archive_data(
+        PathBuf::new(),
+        ArchiveFormat::Zip,
+        files_info,
+        Some(files),
+    ))
+}
+
+fn create_archive_from_files(path: &Path, files: &[PathBuf], level: i32) -> Result<()> {
+    let entries = collect_archive_inputs(files)?;
+    let options = match level {
+        0 => SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+        1 | 6 | 9 => SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .compression_level(Some(level.into())),
+        _ => bail!("无效的压缩程度"),
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    {
+        let mut writer = ZipWriter::new(&mut temp);
+        for entry in entries {
+            if entry.directory {
+                writer.add_directory(&entry.name, options)?;
+                continue;
+            }
+            writer.start_file(&entry.name, options)?;
+            io::copy(
+                &mut File::open(&entry.path)
+                    .with_context(|| format!("无法读取 {}", entry.path.display()))?,
+                &mut writer,
+            )?;
+        }
+        writer.finish()?;
+    }
+    temp.persist_noclobber(path)
+        .map_err(|error| error.error)
+        .context("无法创建压缩包（文件可能已存在）")?;
+    Ok(())
+}
+
+fn compression_target(destination: &Path, name: &str) -> Result<PathBuf> {
+    if !destination.is_dir() {
+        bail!("保存位置不是已有文件夹：{}", destination.display());
+    }
+    let name = name.trim();
+    let mut parts = Path::new(name).components();
+    if name.contains(['/', '\\'])
+        || !matches!(parts.next(), Some(Component::Normal(_)))
+        || parts.next().is_some()
+    {
+        bail!("压缩包名称无效");
+    }
+    let name = if name.to_ascii_lowercase().ends_with(".zip") {
+        name.to_owned()
+    } else {
+        format!("{name}.zip")
+    };
+    Ok(destination.join(name))
 }
 
 fn add_files(path: &Path, directory: &str, files: &[PathBuf]) -> Result<()> {
@@ -855,9 +1007,168 @@ fn prepare_destination(destination: &Path, extra: Option<&str>) -> Result<PathBu
 }
 
 fn main() -> Result<()> {
+    slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .select()?;
     let ui = AppWindow::new()?;
     let current = Arc::new(Mutex::new(None::<Arc<ArchiveData>>));
     let temporary_files = Arc::new(Mutex::new(Vec::<tempfile::TempDir>::new()));
+    {
+        let dropped = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+        let weak = ui.as_weak();
+        let current = current.clone();
+        ui.window().on_winit_window_event(move |_, event| {
+            if let WindowEvent::DroppedFile(path) = event {
+                let mut paths = dropped.borrow_mut();
+                let first = paths.is_empty();
+                paths.push(path.clone());
+                drop(paths);
+                if first {
+                    let dropped = dropped.clone();
+                    let weak = weak.clone();
+                    let current = current.clone();
+                    slint::Timer::single_shot(Duration::from_millis(100), move || {
+                        let files = std::mem::take(&mut *dropped.borrow_mut());
+                        let Some(ui) = weak.upgrade() else {
+                            return;
+                        };
+                        if ui.get_busy()
+                            || ui.get_extract_dialog_open()
+                            || ui.get_appearance_dialog_open()
+                            || ui.get_compression_dialog_open()
+                        {
+                            return;
+                        }
+                        let mut staged = current
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(|archive| archive.staged_sources.clone())
+                            .unwrap_or_default();
+                        staged.extend(files);
+                        run_job(
+                            &ui,
+                            current,
+                            "正在读取拖入的文件…",
+                            "文件已加入待压缩列表",
+                            move || stage_archive_inputs(staged).map(Some),
+                        );
+                    });
+                }
+            }
+            EventResult::Propagate
+        });
+    }
+    #[cfg(target_os = "macos")]
+    let (_app_delegate, _open_timer) = {
+        let weak = ui.as_weak();
+        let current = current.clone();
+        macos::receive_open_files(move |path| {
+            if let Some(ui) = weak.upgrade() {
+                if ui.get_busy()
+                    || ui.get_extract_dialog_open()
+                    || ui.get_appearance_dialog_open()
+                    || ui.get_compression_dialog_open()
+                {
+                    return false;
+                }
+                run_job(
+                    &ui,
+                    current.clone(),
+                    "正在打开压缩包…",
+                    "压缩包已打开",
+                    move || read_archive(&path).map(Some),
+                );
+                true
+            } else {
+                true
+            }
+        })
+    };
+    {
+        let weak = ui.as_weak();
+        let current = current.clone();
+        ui.on_compress_files(move || {
+            let ui = weak.unwrap();
+            if ui.get_busy() {
+                return;
+            }
+            let Some(files) = current
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|archive| archive.staged_sources.clone())
+            else {
+                return;
+            };
+            let name = if files.len() == 1 {
+                format!(
+                    "{}.zip",
+                    files[0].file_name().unwrap_or_default().to_string_lossy()
+                )
+            } else {
+                "新建压缩包.zip".to_owned()
+            };
+            let destination = files[0].parent().unwrap_or_else(|| Path::new("."));
+            ui.set_compression_name(name.into());
+            ui.set_compression_destination(destination.to_string_lossy().to_string().into());
+            ui.set_compression_level(6);
+            ui.set_compression_dialog_open(true);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_choose_compression_destination(move || {
+            let ui = weak.unwrap();
+            let mut dialog = rfd::FileDialog::new();
+            let destination = ui.get_compression_destination().to_string();
+            if Path::new(&destination).is_dir() {
+                dialog = dialog.set_directory(destination);
+            }
+            if let Some(path) = dialog.pick_folder() {
+                ui.set_compression_destination(path.to_string_lossy().to_string().into());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let current = current.clone();
+        ui.on_confirm_compression(move || {
+            let ui = weak.unwrap();
+            if ui.get_busy() || !ui.get_compression_dialog_open() {
+                return;
+            }
+            let Some(files) = current
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|archive| archive.staged_sources.clone())
+            else {
+                return;
+            };
+            let destination = ui.get_compression_destination().to_string();
+            let name = ui.get_compression_name().to_string();
+            let path = match compression_target(Path::new(&destination), &name) {
+                Ok(path) => path,
+                Err(error) => {
+                    report(&ui, Err(error), "");
+                    return;
+                }
+            };
+            let level = ui.get_compression_level();
+            ui.set_compression_dialog_open(false);
+            run_job(
+                &ui,
+                current.clone(),
+                "正在创建压缩包…",
+                "压缩包已创建",
+                move || {
+                    create_archive_from_files(&path, &files, level)?;
+                    read_archive(&path).map(Some)
+                },
+            );
+        });
+    }
     {
         let weak = ui.as_weak();
         let current = current.clone();
@@ -1141,6 +1452,86 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_zip_from_dropped_files_without_overwriting() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let first = dir.path().join("a.txt");
+        let second = dir.path().join("b.txt");
+        fs::write(&first, b"first")?;
+        fs::write(&second, b"second")?;
+        let archive = dir.path().join("files.zip");
+        create_archive_from_files(&archive, &[first.clone(), second.clone()], 6)?;
+        let mut zip = ZipArchive::new(File::open(&archive)?)?;
+        let mut contents = String::new();
+        zip.by_name("a.txt")?.read_to_string(&mut contents)?;
+        assert_eq!(contents, "first");
+        assert_eq!(zip.len(), 2);
+        let before = fs::read(&archive)?;
+        assert!(create_archive_from_files(&archive, &[first.clone()], 6).is_err());
+        assert_eq!(fs::read(&archive)?, before);
+        let other = dir.path().join("other");
+        fs::create_dir(&other)?;
+        fs::create_dir(other.join("empty"))?;
+        fs::write(other.join("a.txt"), b"duplicate")?;
+        let staged = stage_archive_inputs(vec![other.clone(), second])?;
+        assert_eq!(staged.directories[""][0].name, "other");
+        assert!(staged.directories["other/"]
+            .iter()
+            .any(|entry| entry.name == "a.txt"));
+        assert!(staged.directories["other/empty/"].is_empty());
+        let folder_zip = dir.path().join("folder.zip");
+        create_archive_from_files(&folder_zip, &[other.clone()], 0)?;
+        let mut zip = ZipArchive::new(File::open(folder_zip)?)?;
+        assert!(zip.by_name("other/empty/")?.is_dir());
+        assert_eq!(zip.by_name("other/a.txt")?.size(), 9);
+        assert_eq!(
+            zip.by_name("other/a.txt")?.compression(),
+            CompressionMethod::Stored
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&first, other.join("link"))?;
+            assert!(stage_archive_inputs(vec![other.clone()]).is_err());
+        }
+        assert!(create_archive_from_files(
+            &dir.path().join("duplicate.zip"),
+            &[first, other.join("a.txt")],
+            6
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn compression_options_validate_output_and_use_selected_method() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("input.txt");
+        fs::write(&input, vec![b'a'; 4096])?;
+        assert_eq!(
+            compression_target(dir.path(), "归档")?,
+            dir.path().join("归档.zip")
+        );
+        assert_eq!(
+            compression_target(dir.path(), "归档.ZIP")?,
+            dir.path().join("归档.ZIP")
+        );
+        for name in ["", "..", "../escape", "folder/", "folder\\file"] {
+            assert!(compression_target(dir.path(), name).is_err(), "{name}");
+        }
+        assert!(compression_target(&dir.path().join("missing"), "a").is_err());
+        for level in [1, 6, 9] {
+            let path = dir.path().join(format!("{level}.zip"));
+            create_archive_from_files(&path, std::slice::from_ref(&input), level)?;
+            let mut zip = ZipArchive::new(File::open(path)?)?;
+            assert_eq!(
+                zip.by_name("input.txt")?.compression(),
+                CompressionMethod::Deflated
+            );
+        }
+        assert!(create_archive_from_files(&dir.path().join("bad.zip"), &[input], 3).is_err());
+        Ok(())
+    }
 
     #[test]
     fn extraction_progress_counts_selected_bytes() -> Result<()> {

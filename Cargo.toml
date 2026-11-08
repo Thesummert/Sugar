@@ -10,11 +10,16 @@ bzip2 = "0.5"
 flate2 = "1"
 rfd = "0.15"
 sevenz-rust2 = "0.20"
-slint = "1.18"
+slint = { version = "1.18", features = ["unstable-winit-030"] }
 tar = "0.4"
 tempfile = "3"
 xz2 = "0.1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder"] }
+objc2-foundation = { version = "0.2", features = ["NSAppleEventDescriptor", "NSAppleEventManager", "NSObject", "NSString", "NSURL"] }
 
 [build-dependencies]
 slint-build = "1.18"

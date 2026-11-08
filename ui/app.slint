@@ -53,10 +53,15 @@ export component AppWindow inherits Window {
     in-out property <string> selected-entry: "";
     in-out property <string> status: "准备就绪";
     in-out property <bool> has-archive: false;
+    in-out property <bool> staging: false;
     in-out property <bool> busy: false;
     in-out property <bool> can-add: false;
     in-out property <bool> extract-dialog-open: false;
     in-out property <bool> appearance-dialog-open: false;
+    in-out property <bool> compression-dialog-open: false;
+    in-out property <string> compression-name: "";
+    in-out property <string> compression-destination: "";
+    in-out property <int> compression-level: 6;
     in-out property <bool> progress-dialog-open: false;
     in-out property <float> extract-progress: 0;
     in-out property <string> extract-progress-text: "正在准备…";
@@ -69,6 +74,9 @@ export component AppWindow inherits Window {
     in-out property <[TreeEntry]> tree: [];
     callback open-archive();
     callback create-archive();
+    callback compress-files();
+    callback choose-compression-destination();
+    callback confirm-compression();
     callback add-files();
     callback extract-archive();
     callback extract-item(string);
@@ -90,7 +98,7 @@ export component AppWindow inherits Window {
             title: "设置";
             MenuItem {
                 title: "外观…";
-                enabled: !root.busy && !root.extract-dialog-open && !root.appearance-dialog-open;
+                enabled: !root.busy && !root.extract-dialog-open && !root.appearance-dialog-open && !root.compression-dialog-open;
                 activated => { root.appearance-dialog-open = true; }
             }
         }
@@ -109,7 +117,7 @@ export component AppWindow inherits Window {
                     VerticalLayout { spacing: 0px; Text { text: "SUGAR"; color: root.text-main; font-size: 14px; font-weight: 800; } Text { text: "ARCHIVE"; color: root.muted; font-size: 10px; letter-spacing: 1px; } }
                 }
                 Rectangle { height: 12px; }
-                Text { text: "压缩包目录"; color: root.muted; font-size: 11px; font-weight: 700; height: 22px; }
+                Text { text: root.staging ? "待压缩目录" : "压缩包目录"; color: root.muted; font-size: 11px; font-weight: 700; height: 22px; }
                 if root.has-archive : Rectangle {
                     height: 38px; border-radius: 7px;
                     background: root.current-directory == "" ? root.selected : root-touch.has-hover ? root.soft : transparent;
@@ -137,8 +145,9 @@ export component AppWindow inherits Window {
                 ActionButton { width: 90px; label: "＋  新建"; enabled: !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.create-archive(); } }
                 Rectangle { width: 1px; background: root.line; }
                 ActionButton { width: 90px; label: "＋  添加文件"; enabled: root.can-add && !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.add-files(); } }
-                ActionButton { width: 90px; label: "↓  解压全部"; enabled: root.has-archive && !root.busy; primary: true; fg: root.text-main; surface: root.soft; clicked => { root.extract-archive(); } }
-                ActionButton { width: 90px; label: "↓  解压所选"; enabled: root.has-archive && root.selected-entry != "" && !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.extract-item(root.selected-entry); } }
+                if root.staging : ActionButton { width: 90px; label: "压缩"; enabled: !root.busy; primary: true; fg: root.text-main; surface: root.soft; clicked => { root.compress-files(); } }
+                if !root.staging : ActionButton { width: 90px; label: "↓  解压全部"; enabled: root.has-archive && !root.busy; primary: true; fg: root.text-main; surface: root.soft; clicked => { root.extract-archive(); } }
+                if !root.staging : ActionButton { width: 90px; label: "↓  解压所选"; enabled: root.has-archive && root.selected-entry != "" && !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.extract-item(root.selected-entry); } }
                 Rectangle { horizontal-stretch: 1; }
             }
             Rectangle {
@@ -157,7 +166,7 @@ export component AppWindow inherits Window {
                     Rectangle { height: 1px; background: root.line; }
                     HorizontalLayout { height: 40px; padding-left: 22px; padding-right: 22px; Text { text: "名称"; color: root.muted; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; } Text { text: "类型"; color: root.muted; font-size: 11px; width: 75px; vertical-alignment: center; } Text { text: "大小"; color: root.muted; font-size: 11px; width: 75px; vertical-alignment: center; } Text { text: "压缩后"; color: root.muted; font-size: 11px; width: 75px; vertical-alignment: center; } }
                     Rectangle { height: 1px; background: root.line; }
-                    if root.entries.length == 0 : Rectangle { vertical-stretch: 1; VerticalLayout { alignment: center; spacing: 10px; Text { text: "▤"; color: #a89bf5; font-size: 42px; horizontal-alignment: center; } Text { text: root.has-archive ? "此文件夹为空" : "开始管理你的文件"; color: root.text-main; font-size: 15px; font-weight: 700; horizontal-alignment: center; } Text { text: root.has-archive ? "此目录没有内容" : "打开压缩包或新建 ZIP 压缩包"; color: root.muted; font-size: 12px; horizontal-alignment: center; } } }
+                    if root.entries.length == 0 : Rectangle { vertical-stretch: 1; VerticalLayout { alignment: center; spacing: 10px; Text { text: "▤"; color: #a89bf5; font-size: 42px; horizontal-alignment: center; } Text { text: root.has-archive ? "此文件夹为空" : "开始管理你的文件"; color: root.text-main; font-size: 15px; font-weight: 700; horizontal-alignment: center; } Text { text: root.has-archive ? "此目录没有内容" : "打开压缩包，或拖入文件创建 ZIP"; color: root.muted; font-size: 12px; horizontal-alignment: center; } } }
                     if root.entries.length > 0 : ListView {
                         vertical-stretch: 1; content-width: self.width;
                         for entry in root.entries : Rectangle {
@@ -165,7 +174,7 @@ export component AppWindow inherits Window {
                             background: root.selected-entry == entry.path ? root.selected : row-touch.has-hover ? root.soft : transparent;
                             row-touch := TouchArea {
                                 clicked => { root.selected-entry = entry.path; }
-                                double-clicked => { if entry.directory { root.navigate(entry.path); } else { root.open-item(entry.path); } }
+                                double-clicked => { if entry.directory { root.navigate(entry.path); } else if !root.staging { root.open-item(entry.path); } }
                             }
                             HorizontalLayout {
                                 padding-left: 22px; padding-right: 22px; spacing: 0px;
@@ -210,6 +219,44 @@ export component AppWindow inherits Window {
                     height: 38px;
                     Rectangle { horizontal-stretch: 1; }
                     ActionButton { width: 84px; label: "关闭"; fg: root.text-main; surface: root.soft; clicked => { root.appearance-dialog-open = false; } }
+                }
+            }
+        }
+    }
+    if root.compression-dialog-open : Rectangle {
+        width: parent.width; height: parent.height; background: #00000088;
+        TouchArea { }
+        Rectangle {
+            width: min(520px, parent.width - 48px); height: 440px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            border-radius: 14px; background: root.panel;
+            VerticalLayout {
+                padding: 24px; spacing: 10px;
+                Text { text: "压缩选项"; color: root.text-main; font-size: 19px; font-weight: 700; height: 26px; }
+                Text { text: "压缩格式：ZIP"; color: root.muted; font-size: 12px; height: 20px; }
+                Text { text: "压缩包名称"; color: root.text-main; font-size: 12px; font-weight: 600; height: 18px; }
+                LineEdit { height: 38px; text <=> root.compression-name; placeholder-text: "输入压缩包名称"; }
+                Text { text: "保存位置"; color: root.text-main; font-size: 12px; font-weight: 600; height: 18px; }
+                HorizontalLayout {
+                    height: 38px; spacing: 8px;
+                    LineEdit { text <=> root.compression-destination; placeholder-text: "输入或选择文件夹"; horizontal-stretch: 1; }
+                    ActionButton { width: 72px; label: "浏览…"; fg: root.text-main; surface: root.soft; clicked => { root.choose-compression-destination(); } }
+                }
+                Text { text: "压缩程度"; color: root.text-main; font-size: 12px; font-weight: 600; height: 18px; }
+                HorizontalLayout {
+                    height: 38px; spacing: 8px;
+                    ActionButton { label: "仅存储"; primary: root.compression-level == 0; fg: root.text-main; surface: root.soft; clicked => { root.compression-level = 0; } }
+                    ActionButton { label: "快速"; primary: root.compression-level == 1; fg: root.text-main; surface: root.soft; clicked => { root.compression-level = 1; } }
+                    ActionButton { label: "标准"; primary: root.compression-level == 6; fg: root.text-main; surface: root.soft; clicked => { root.compression-level = 6; } }
+                    ActionButton { label: "较小"; primary: root.compression-level == 9; fg: root.text-main; surface: root.soft; clicked => { root.compression-level = 9; } }
+                }
+                Text { text: "较高压缩程度可能需要更长时间"; color: root.muted; font-size: 11px; height: 18px; }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    height: 38px; spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    ActionButton { width: 84px; label: "取消"; fg: root.text-main; surface: root.soft; clicked => { root.compression-dialog-open = false; } }
+                    ActionButton { width: 100px; label: "开始压缩"; primary: true; enabled: root.compression-name != "" && root.compression-destination != ""; fg: root.text-main; surface: root.soft; clicked => { root.confirm-compression(); } }
                 }
             }
         }
