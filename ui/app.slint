@@ -268,7 +268,7 @@ export component AppWindow inherits Window {
         background: #00000088;
         TouchArea { }
         Rectangle {
-            width: min(520px, parent.width - 48px); height: 310px;
+            width: min(520px, parent.width - 48px); height: 370px;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             border-radius: 14px; background: root.panel;
             VerticalLayout {
@@ -286,16 +286,21 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         padding-left: 12px; padding-right: 12px; spacing: 10px;
                         Rectangle { width: 18px; height: 18px; border-radius: 4px; border-width: 1px; border-color: root.create-extra-folder ? #7057f5 : root.muted; background: root.create-extra-folder ? #7057f5 : transparent; Text { text: root.create-extra-folder ? "✓" : ""; color: white; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; } }
-                        Text { text: "创建额外文件夹：" + root.extra-folder-name; color: root.text-main; font-size: 12px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                        Text { text: "创建额外文件夹"; color: root.text-main; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
                     }
                     TouchArea { clicked => { root.create-extra-folder = !root.create-extra-folder; } }
+                }
+                HorizontalLayout {
+                    height: 38px; spacing: 10px;
+                    Text { text: "文件夹名称"; color: root.text-main; font-size: 12px; vertical-alignment: center; }
+                    LineEdit { text <=> root.extra-folder-name; enabled: root.create-extra-folder; placeholder-text: "输入解压后的文件夹名称"; horizontal-stretch: 1; }
                 }
                 Rectangle { vertical-stretch: 1; }
                 HorizontalLayout {
                     height: 38px; spacing: 10px;
                     Rectangle { horizontal-stretch: 1; }
                     ActionButton { width: 84px; label: "取消"; fg: root.text-main; surface: root.soft; clicked => { root.extract-dialog-open = false; } }
-                    ActionButton { width: 100px; label: "开始解压"; primary: true; enabled: root.extract-destination != ""; fg: root.text-main; surface: root.soft; clicked => { root.confirm-extract(); } }
+                    ActionButton { width: 100px; label: "开始解压"; primary: true; enabled: root.extract-destination != "" && (!root.create-extra-folder || root.extra-folder-name != ""); fg: root.text-main; surface: root.soft; clicked => { root.confirm-extract(); } }
                 }
             }
         }

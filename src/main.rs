@@ -990,11 +990,12 @@ fn prepare_destination(destination: &Path, extra: Option<&str>) -> Result<PathBu
         return Ok(destination.to_owned());
     };
     let mut components = Path::new(name).components();
-    if name.contains('\\')
+    if name.trim().is_empty()
+        || name.contains(['/', '\\', '\0'])
         || !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
     {
-        bail!("额外文件夹名称无效");
+        bail!("文件夹名称无效，请输入单个文件夹名称，不要包含路径分隔符");
     }
     let target = destination.join(name);
     match fs::symlink_metadata(&target) {
@@ -1625,8 +1626,23 @@ mod tests {
         let extra = prepare_destination(dir.path(), Some("资料"))?;
         assert!(extra.is_dir());
         assert_eq!(prepare_destination(dir.path(), Some("资料"))?, extra);
-        assert!(prepare_destination(dir.path(), Some("../escape")).is_err());
-        assert!(prepare_destination(dir.path(), Some("..")).is_err());
+        for name in [
+            "",
+            "   ",
+            ".",
+            "..",
+            "../escape",
+            "/tmp",
+            "nested/folder",
+            "folder/",
+            "folder\\nested",
+            "invalid\0name",
+        ] {
+            assert!(
+                prepare_destination(dir.path(), Some(name)).is_err(),
+                "{name:?}"
+            );
+        }
         fs::write(dir.path().join("file"), b"existing")?;
         assert!(prepare_destination(dir.path(), Some("file")).is_err());
         assert!(prepare_destination(&dir.path().join("missing"), None).is_err());
@@ -1635,6 +1651,24 @@ mod tests {
             std::os::unix::fs::symlink(dir.path(), dir.path().join("link"))?;
             assert!(prepare_destination(dir.path(), Some("link")).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_into_custom_named_folder() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("input.txt");
+        fs::write(&input, b"custom extraction folder")?;
+        let archive = dir.path().join("archive.zip");
+        create_archive_from_files(&archive, &[input], 6)?;
+        let destination = prepare_destination(dir.path(), Some("整理后的资料 2026"))?;
+        extract_archive(&archive, &destination)?;
+        assert_eq!(destination, dir.path().join("整理后的资料 2026"));
+        assert_eq!(
+            fs::read(destination.join("input.txt"))?,
+            b"custom extraction folder"
+        );
+        assert!(!dir.path().join("archive").exists());
         Ok(())
     }
 
