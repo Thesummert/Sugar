@@ -57,6 +57,7 @@ export component AppWindow inherits Window {
     in-out property <bool> has-archive: false;
     in-out property <bool> staging: false;
     in-out property <bool> busy: false;
+    in-out property <int> drag-generation: 0;
     in-out property <bool> can-add: false;
     in-out property <bool> extract-dialog-open: false;
     in-out property <bool> appearance-dialog-open: false;
@@ -83,6 +84,9 @@ export component AppWindow inherits Window {
     callback extract-archive();
     callback extract-item(string);
     callback open-item(string);
+    callback drag-item(string, int);
+    pure callback can-drop-files(data-transfer) -> bool;
+    callback drop-files(data-transfer);
     callback choose-destination();
     callback confirm-extract();
     callback navigate(string);
@@ -105,97 +109,124 @@ export component AppWindow inherits Window {
             }
         }
     }
-    HorizontalLayout {
-        spacing: 0px;
-        Rectangle {
-            width: 235px;
-            background: root.panel;
-            VerticalLayout {
-                padding: 18px;
-                spacing: 10px;
-                HorizontalLayout {
-                    height: 42px; spacing: 10px;
-                    Rectangle { width: 38px; height: 38px; border-radius: 11px; background: #7057f5; Text { text: "S"; color: white; font-size: 21px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; } }
-                    VerticalLayout { spacing: 0px; Text { text: "SUGAR"; color: root.text-main; font-size: 14px; font-weight: 800; } Text { text: "ARCHIVE"; color: root.muted; font-size: 10px; letter-spacing: 1px; } }
-                }
-                Rectangle { height: 12px; }
-                Text { text: root.staging ? "待压缩目录" : "压缩包目录"; color: root.muted; font-size: 11px; font-weight: 700; height: 22px; }
-                if root.has-archive : Rectangle {
-                    height: 38px; border-radius: 7px;
-                    background: root.current-directory == "" ? root.selected : root-touch.has-hover ? root.soft : transparent;
-                    Text { x: 10px; width: parent.width - 20px; height: parent.height; text: "▣  " + root.archive-name; color: root.current-directory == "" ? #8069f8 : root.text-main; font-size: 12px; font-weight: 600; overflow: elide; vertical-alignment: center; }
-                    root-touch := TouchArea { clicked => { root.navigate(""); } }
-                }
-                if !root.has-archive : Text { text: "打开压缩包后显示目录"; color: root.muted; font-size: 12px; wrap: word-wrap; }
-                ListView {
-                    vertical-stretch: 1;
-                    content-width: self.width;
-                    for folder in root.tree : Rectangle {
-                        height: 34px; border-radius: 7px;
-                        background: root.current-directory == folder.path ? root.selected : folder-touch.has-hover ? root.soft : transparent;
-                        Text { x: min(10px + folder.depth * 14px, parent.width - 30px); width: parent.width - self.x - 8px; height: parent.height; text: "▸  " + folder.name; color: root.current-directory == folder.path ? #8069f8 : root.text-main; font-size: 12px; overflow: elide; vertical-alignment: center; }
-                        folder-touch := TouchArea { clicked => { root.navigate(folder.path); } }
-                    }
-                }
-            }
-        }
-        VerticalLayout {
-            padding: 24px; spacing: 16px;
-            HorizontalLayout {
-                height: 42px; spacing: 9px;
-                ActionButton { width: 90px; label: "↗  打开文件"; enabled: !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.open-archive(); } }
-                ActionButton { width: 90px; label: "＋  新建"; enabled: !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.create-archive(); } }
-                Rectangle { width: 1px; background: root.line; }
-                ActionButton { width: 90px; label: "＋  添加文件"; enabled: root.can-add && !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.add-files(); } }
-                if root.staging : ActionButton { width: 90px; label: "压缩"; enabled: !root.busy; primary: true; fg: root.text-main; surface: root.soft; clicked => { root.compress-files(); } }
-                if !root.staging : ActionButton { width: 90px; label: "↓  解压全部"; enabled: root.has-archive && !root.busy; primary: true; fg: root.text-main; surface: root.soft; clicked => { root.extract-archive(); } }
-                if !root.staging : ActionButton { width: 90px; label: "↓  解压所选"; enabled: root.has-archive && root.selected-entry != "" && !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.extract-item(root.selected-entry); } }
-                Rectangle { horizontal-stretch: 1; }
-            }
+    DropArea {
+        enabled: !root.busy && !root.extract-dialog-open && !root.appearance-dialog-open && !root.compression-dialog-open;
+        can-drop(event) => { root.can-drop-files(event.data) ? DragAction.copy : DragAction.none }
+        dropped(event) => { root.drop-files(event.data); return DragAction.copy; }
+        HorizontalLayout {
+            spacing: 0px;
             Rectangle {
-                vertical-stretch: 1; border-radius: 12px; background: root.panel;
+                width: 235px;
+                background: root.panel;
                 VerticalLayout {
-                    spacing: 0px;
+                    padding: 18px;
+                    spacing: 10px;
                     HorizontalLayout {
-                        height: 60px; padding-left: 20px; padding-right: 20px; spacing: 12px;
-                        VerticalLayout {
-                            width: 56px; alignment: center;
-                            ActionButton { label: "← 返回"; enabled: root.has-archive && root.current-directory != ""; fg: root.text-main; surface: root.soft; clicked => { root.navigate-parent(); } }
-                        }
-                        Text { text: root.has-archive ? "根目录 / " + root.current-directory : "压缩包内容"; color: root.text-main; font-size: 13px; font-weight: 700; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-                        Text { text: root.has-archive ? root.entries.length + " 个项目" : ""; color: root.muted; font-size: 11px; vertical-alignment: center; }
+                        height: 42px; spacing: 10px;
+                        Rectangle { width: 38px; height: 38px; border-radius: 11px; background: #7057f5; Text { text: "S"; color: white; font-size: 21px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; } }
+                        VerticalLayout { spacing: 0px; Text { text: "SUGAR"; color: root.text-main; font-size: 14px; font-weight: 800; } Text { text: "ARCHIVE"; color: root.muted; font-size: 10px; letter-spacing: 1px; } }
                     }
-                    Rectangle { height: 1px; background: root.line; }
-                    HorizontalLayout { height: 40px; padding-left: 22px; padding-right: 22px; Text { text: "名称"; color: root.muted; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; } Text { text: "类型"; color: root.muted; font-size: 11px; width: 75px; vertical-alignment: center; } Text { text: "大小"; color: root.muted; font-size: 11px; width: 75px; vertical-alignment: center; } Text { text: "压缩后"; color: root.muted; font-size: 11px; width: 75px; vertical-alignment: center; } }
-                    Rectangle { height: 1px; background: root.line; }
-                    if root.entries.length == 0 : Rectangle { vertical-stretch: 1; VerticalLayout { alignment: center; spacing: 10px; Text { text: "▤"; color: #a89bf5; font-size: 42px; horizontal-alignment: center; } Text { text: root.has-archive ? "此文件夹为空" : "开始管理你的文件"; color: root.text-main; font-size: 15px; font-weight: 700; horizontal-alignment: center; } Text { text: root.has-archive ? "此目录没有内容" : "打开压缩包，或拖入文件创建 ZIP"; color: root.muted; font-size: 12px; horizontal-alignment: center; } } }
-                    if root.entries.length > 0 : ListView {
-                        vertical-stretch: 1; content-width: self.width;
-                        for entry in root.entries : Rectangle {
-                            height: 48px;
-                            background: root.selected-entry == entry.path ? root.selected : row-touch.has-hover ? root.soft : transparent;
-                            row-touch := TouchArea {
-                                clicked => { root.selected-entry = entry.path; }
-                                double-clicked => { if entry.directory { root.navigate(entry.path); } else if !root.staging { root.open-item(entry.path); } }
-                            }
-                            HorizontalLayout {
-                                padding-left: 22px; padding-right: 22px; spacing: 0px;
-                                Rectangle {
-                                    width: 30px;
-                                    FileIcon { y: (parent.height - self.height) / 2; kind: entry.icon; }
-                                }
-                                Rectangle { width: 10px; }
-                                Text { text: entry.name; color: root.text-main; font-size: 12px; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
-                                Text { text: entry.kind; color: root.muted; font-size: 12px; width: 75px; vertical-alignment: center; }
-                                Text { text: entry.size; color: root.muted; font-size: 12px; width: 75px; vertical-alignment: center; }
-                                Text { text: entry.compressed; color: root.muted; font-size: 12px; width: 75px; vertical-alignment: center; }
-                            }
-                            Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: root.line; }
+                    Rectangle { height: 12px; }
+                    Text { text: root.staging ? "待压缩目录" : "压缩包目录"; color: root.muted; font-size: 11px; font-weight: 700; height: 22px; }
+                    if root.has-archive : Rectangle {
+                        height: 38px; border-radius: 7px;
+                        background: root.current-directory == "" ? root.selected : root-touch.has-hover ? root.soft : transparent;
+                        Text { x: 10px; width: parent.width - 20px; height: parent.height; text: "▣  " + root.archive-name; color: root.current-directory == "" ? #8069f8 : root.text-main; font-size: 12px; font-weight: 600; overflow: elide; vertical-alignment: center; }
+                        root-touch := TouchArea { clicked => { root.navigate(""); } }
+                    }
+                    if !root.has-archive : Text { text: "打开压缩包后显示目录"; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                    ListView {
+                        vertical-stretch: 1;
+                        content-width: self.width;
+                        for folder in root.tree : Rectangle {
+                            height: 34px; border-radius: 7px;
+                            background: root.current-directory == folder.path ? root.selected : folder-touch.has-hover ? root.soft : transparent;
+                            Text { x: min(10px + folder.depth * 14px, parent.width - 30px); width: parent.width - self.x - 8px; height: parent.height; text: "▸  " + folder.name; color: root.current-directory == folder.path ? #8069f8 : root.text-main; font-size: 12px; overflow: elide; vertical-alignment: center; }
+                            folder-touch := TouchArea { clicked => { root.navigate(folder.path); } }
                         }
                     }
                 }
             }
-            HorizontalLayout { height: 18px; Text { text: "●  " + root.status; color: root.muted; font-size: 11px; } Rectangle { horizontal-stretch: 1; } Text { text: "ARCHIVE MANAGER"; color: root.muted; font-size: 10px; } }
+            VerticalLayout {
+                padding: 24px; spacing: 16px;
+                HorizontalLayout {
+                    height: 42px; spacing: 9px;
+                    ActionButton { width: 90px; label: "↗  打开文件"; enabled: !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.open-archive(); } }
+                    ActionButton { width: 90px; label: "＋  新建"; enabled: !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.create-archive(); } }
+                    Rectangle { width: 1px; background: root.line; }
+                    ActionButton { width: 90px; label: "＋  添加文件"; enabled: root.can-add && !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.add-files(); } }
+                    if root.staging : ActionButton { width: 90px; label: "压缩"; enabled: !root.busy; primary: true; fg: root.text-main; surface: root.soft; clicked => { root.compress-files(); } }
+                    if !root.staging : ActionButton { width: 90px; label: "↓  解压全部"; enabled: root.has-archive && !root.busy; primary: true; fg: root.text-main; surface: root.soft; clicked => { root.extract-archive(); } }
+                    if !root.staging : ActionButton { width: 90px; label: "↓  解压所选"; enabled: root.has-archive && root.selected-entry != "" && !root.busy; fg: root.text-main; surface: root.soft; clicked => { root.extract-item(root.selected-entry); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Rectangle {
+                    vertical-stretch: 1; border-radius: 12px; background: root.panel;
+                    VerticalLayout {
+                        spacing: 0px;
+                        HorizontalLayout {
+                            height: 60px; padding-left: 20px; padding-right: 20px; spacing: 12px;
+                            VerticalLayout {
+                                width: 56px; alignment: center;
+                                ActionButton { label: "← 返回"; enabled: root.has-archive && root.current-directory != ""; fg: root.text-main; surface: root.soft; clicked => { root.navigate-parent(); } }
+                            }
+                            Text { text: root.has-archive ? "根目录 / " + root.current-directory : "压缩包内容"; color: root.text-main; font-size: 13px; font-weight: 700; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                            Text { text: root.has-archive ? root.entries.length + " 个项目" : ""; color: root.muted; font-size: 11px; vertical-alignment: center; }
+                        }
+                        Rectangle { height: 1px; background: root.line; }
+                        HorizontalLayout { height: 40px; padding-left: 22px; padding-right: 22px; Text { text: "名称"; color: root.muted; font-size: 11px; horizontal-stretch: 1; vertical-alignment: center; } Text { text: "类型"; color: root.muted; font-size: 11px; width: 75px; vertical-alignment: center; } Text { text: "大小"; color: root.muted; font-size: 11px; width: 75px; vertical-alignment: center; } Text { text: "压缩后"; color: root.muted; font-size: 11px; width: 75px; vertical-alignment: center; } }
+                        Rectangle { height: 1px; background: root.line; }
+                        if root.entries.length == 0 : Rectangle { vertical-stretch: 1; VerticalLayout { alignment: center; spacing: 10px; Text { text: "▤"; color: #a89bf5; font-size: 42px; horizontal-alignment: center; } Text { text: root.has-archive ? "此文件夹为空" : "开始管理你的文件"; color: root.text-main; font-size: 15px; font-weight: 700; horizontal-alignment: center; } Text { text: root.has-archive ? "此目录没有内容" : "打开压缩包，或拖入文件创建 ZIP"; color: root.muted; font-size: 12px; horizontal-alignment: center; } } }
+                        if root.entries.length > 0 : ListView {
+                            vertical-stretch: 1; content-width: self.width;
+                            for entry in root.entries : Rectangle {
+                                height: 48px;
+                                property <bool> drag-requested: false;
+                                property <bool> drag-armed: false;
+                                background: root.selected-entry == entry.path ? root.selected : row-touch.has-hover ? root.soft : transparent;
+                                row-touch := TouchArea {
+                                    mouse-cursor: root.staging ? MouseCursor.default : MouseCursor.grab;
+                                    pointer-event(event) => {
+                                        if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                                            root.drag-generation += 1;
+                                            parent.drag-requested = false;
+                                            parent.drag-armed = !root.busy && !root.staging;
+                                            if !root.busy { root.selected-entry = entry.path; }
+                                        }
+                                        if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                                            root.drag-generation += 1;
+                                            parent.drag-armed = false;
+                                        }
+                                    }
+                                    moved => {
+                                        if parent.drag-armed && !parent.drag-requested && !root.busy
+                                            && (abs(self.mouse-x - self.pressed-x) > 8px || abs(self.mouse-y - self.pressed-y) > 8px) {
+                                            parent.drag-requested = true;
+                                            root.drag-item(entry.path, root.drag-generation);
+                                        }
+                                    }
+                                    clicked => { if !root.busy && !parent.drag-requested { root.selected-entry = entry.path; } }
+                                    double-clicked => { if !root.busy && !parent.drag-requested { if entry.directory { root.navigate(entry.path); } else if !root.staging { root.open-item(entry.path); } } }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 22px; padding-right: 22px; spacing: 0px;
+                                    Rectangle {
+                                        width: 30px;
+                                        FileIcon { y: (parent.height - self.height) / 2; kind: entry.icon; }
+                                    }
+                                    Rectangle { width: 10px; }
+                                    Text { text: entry.name; color: root.text-main; font-size: 12px; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
+                                    Text { text: entry.kind; color: root.muted; font-size: 12px; width: 75px; vertical-alignment: center; }
+                                    Text { text: entry.size; color: root.muted; font-size: 12px; width: 75px; vertical-alignment: center; }
+                                    Text { text: entry.compressed; color: root.muted; font-size: 12px; width: 75px; vertical-alignment: center; }
+                                }
+                                Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: root.line; }
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout { height: 18px; spacing: 12px; Text { text: "●  " + root.status; color: root.muted; font-size: 11px; horizontal-stretch: 1; overflow: elide; } Text { text: root.has-archive && !root.staging ? "拖出文件或文件夹到目标文件夹解压" : "ARCHIVE MANAGER"; color: root.muted; font-size: 10px; } }
+            }
         }
     }
     if root.appearance-dialog-open : Rectangle {

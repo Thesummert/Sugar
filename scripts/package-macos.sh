@@ -6,6 +6,26 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 1
 fi
 
+# Use the same Qt installation to compile and bundle the application.
+if [ -z "${QMAKE:-}" ]; then
+    if command -v qmake6 >/dev/null 2>&1; then
+        QMAKE=$(command -v qmake6)
+    elif command -v qmake >/dev/null 2>&1; then
+        QMAKE=$(command -v qmake)
+    elif command -v brew >/dev/null 2>&1; then
+        QMAKE="$(brew --prefix qt)/bin/qmake"
+    else
+        echo "需要 Qt 开发环境（例如 brew install qt），或通过 QMAKE 指定 qmake 路径。" >&2
+        exit 1
+    fi
+fi
+export QMAKE
+qt_bin_dir=$("$QMAKE" -query QT_INSTALL_BINS)
+if [ ! -x "$qt_bin_dir/macdeployqt" ]; then
+    echo "找不到 macdeployqt：$qt_bin_dir/macdeployqt" >&2
+    exit 1
+fi
+
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
 app="$project_dir/target/macos/Sugar Archive.app"
@@ -14,5 +34,6 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$project_dir/target/release/sugar-archive" "$app/Contents/MacOS/sugar-archive"
 cp "$project_dir/macos/Info.plist" "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
+"$qt_bin_dir/macdeployqt" "$app" -always-overwrite
 codesign --force --deep --sign - "$app"
 echo "已生成：$app"

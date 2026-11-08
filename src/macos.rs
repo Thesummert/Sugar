@@ -49,7 +49,7 @@ pub fn receive_open_files(
     let mtm = MainThreadMarker::new().expect("macOS application must run on the main thread");
     let handler: Retained<OpenEventHandler> =
         unsafe { msg_send_id![super(mtm.alloc().set_ivars(())), init] };
-    // Register only the open-document Apple event, leaving Winit's application delegate intact.
+    // Register only the open-document Apple event, leaving the backend's application delegate intact.
     unsafe {
         let manager = NSAppleEventManager::sharedAppleEventManager();
         let _: () = msg_send![&*manager,

@@ -1,21 +1,20 @@
 use anyhow::{bail, Context, Result};
-use slint::winit_030::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker};
 use std::{
     borrow::Cow,
-    cell::RefCell,
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Read},
     path::{Component, Path, PathBuf},
-    rc::Rc,
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 slint::include_modules!();
+
+mod native_drag;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -716,9 +715,24 @@ fn extract_temporary_file(archive: &Path, selection: &str) -> Result<(tempfile::
     if selection.is_empty() || selection.ends_with('/') {
         bail!("请选择文件");
     }
-    let name = Path::new(selection).file_name().context("文件名无效")?;
-    let directory = tempfile::Builder::new().prefix("sugar-open-").tempdir()?;
-    extract_selection(archive, directory.path(), Some(selection))?;
+    extract_temporary_selection(archive, selection, &mut |_, _| {})
+}
+
+fn extract_temporary_selection(
+    archive: &Path,
+    selection: &str,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(tempfile::TempDir, PathBuf)> {
+    if selection.is_empty() {
+        bail!("请选择文件或文件夹");
+    }
+    let name = Path::new(selection.trim_end_matches('/'))
+        .file_name()
+        .context("文件名无效")?;
+    let directory = tempfile::Builder::new()
+        .prefix("sugar-extract-")
+        .tempdir()?;
+    extract_selection_with_progress(archive, directory.path(), Some(selection), progress)?;
     let file = directory.path().join(name);
     Ok((directory, file))
 }
@@ -742,6 +756,7 @@ fn open_with_default_app(path: &Path) -> Result<()> {
 }
 
 // A selected directory retains its own name, but drops its parents in the archive.
+#[cfg(test)]
 fn extract_selection(path: &Path, destination: &Path, selection: Option<&str>) -> Result<()> {
     extract_selection_with_progress(path, destination, selection, &mut |_, _| {})
 }
@@ -1007,57 +1022,201 @@ fn prepare_destination(destination: &Path, extra: Option<&str>) -> Result<PathBu
     Ok(target)
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct ArchiveVersion {
+    length: u64,
+    modified: SystemTime,
+}
+
+impl ArchiveVersion {
+    fn read(path: &Path) -> Result<Self> {
+        let metadata = fs::metadata(path).context("无法读取压缩包信息")?;
+        Ok(Self {
+            length: metadata.len(),
+            modified: metadata.modified()?,
+        })
+    }
+}
+
+struct PreparedDrag {
+    archive: Arc<ArchiveData>,
+    item: String,
+    version: ArchiveVersion,
+    path: PathBuf,
+}
+
+impl PreparedDrag {
+    fn matches(&self, archive: &Arc<ArchiveData>, item: &str, version: &ArchiveVersion) -> bool {
+        Arc::ptr_eq(&self.archive, archive)
+            && self.item == item
+            && self.version == *version
+            && self.path.exists()
+    }
+}
+
+fn start_prepared_drag(ui: &AppWindow, path: PathBuf, generation: i32) {
+    ui.set_busy(true);
+    let weak = ui.as_weak();
+    // QDrag runs a nested platform event loop. Queue outside both pointer and
+    // Slint timer callbacks, since nested timer activation is not supported.
+    let _ = weak.upgrade_in_event_loop(move |ui| {
+        if ui.get_drag_generation() != generation {
+            ui.set_busy(false);
+            ui.set_status("准备完成，再次拖动所选项目即可解压到目标文件夹".into());
+            return;
+        }
+        ui.set_status("拖到目标文件夹后松开鼠标（Esc 取消）".into());
+        let result = native_drag::start(&path);
+        if result != native_drag::DragResult::Released {
+            // A native drag consumes the release; clear Slint's row pointer grab
+            // without turning the drag into a click or a double-click.
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                    position: slint::LogicalPosition::new(-1.0, -1.0),
+                    button: slint::platform::PointerEventButton::Left,
+                });
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::PointerExited);
+        }
+        ui.set_busy(false);
+        ui.set_status(
+            match result {
+                native_drag::DragResult::Copied => "已交给文件管理器复制到目标文件夹",
+                native_drag::DragResult::Cancelled => "已取消拖出解压",
+                native_drag::DragResult::Released => {
+                    "准备完成，再次拖动所选项目即可解压到目标文件夹"
+                }
+            }
+            .into(),
+        );
+    });
+}
+
 fn main() -> Result<()> {
     slint::BackendSelector::new()
-        .backend_name("winit".into())
+        .backend_name("qt".into())
         .select()?;
     let ui = AppWindow::new()?;
     let current = Arc::new(Mutex::new(None::<Arc<ArchiveData>>));
     let temporary_files = Arc::new(Mutex::new(Vec::<tempfile::TempDir>::new()));
+    let prepared_drag = Arc::new(Mutex::new(None::<PreparedDrag>));
     {
-        let dropped = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
         let weak = ui.as_weak();
         let current = current.clone();
-        ui.window().on_winit_window_event(move |_, event| {
-            if let WindowEvent::DroppedFile(path) = event {
-                let mut paths = dropped.borrow_mut();
-                let first = paths.is_empty();
-                paths.push(path.clone());
-                drop(paths);
-                if first {
-                    let dropped = dropped.clone();
-                    let weak = weak.clone();
-                    let current = current.clone();
-                    slint::Timer::single_shot(Duration::from_millis(100), move || {
-                        let files = std::mem::take(&mut *dropped.borrow_mut());
-                        let Some(ui) = weak.upgrade() else {
-                            return;
-                        };
-                        if ui.get_busy()
-                            || ui.get_extract_dialog_open()
-                            || ui.get_appearance_dialog_open()
-                            || ui.get_compression_dialog_open()
-                        {
-                            return;
-                        }
-                        let mut staged = current
-                            .lock()
-                            .unwrap()
-                            .as_ref()
-                            .and_then(|archive| archive.staged_sources.clone())
-                            .unwrap_or_default();
-                        staged.extend(files);
-                        run_job(
-                            &ui,
-                            current,
-                            "正在读取拖入的文件…",
-                            "文件已加入待压缩列表",
-                            move || stage_archive_inputs(staged).map(Some),
-                        );
-                    });
-                }
+        ui.on_can_drop_files(|data| data.has_file_paths());
+        ui.on_drop_files(move |data| {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_busy()
+                || ui.get_extract_dialog_open()
+                || ui.get_appearance_dialog_open()
+                || ui.get_compression_dialog_open()
+            {
+                return;
             }
-            EventResult::Propagate
+            let Ok(paths) = data.file_paths() else { return };
+            let mut staged = current
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|archive| archive.staged_sources.clone())
+                .unwrap_or_default();
+            staged.extend(paths.map(Path::to_path_buf));
+            run_job(
+                &ui,
+                current.clone(),
+                "正在读取拖入的文件…",
+                "文件已加入待压缩列表",
+                move || stage_archive_inputs(staged).map(Some),
+            );
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let current = current.clone();
+        let temporary_files = temporary_files.clone();
+        ui.on_drag_item(move |item, generation| {
+            let ui = weak.unwrap();
+            if ui.get_busy()
+                || ui.get_staging()
+                || ui.get_extract_dialog_open()
+                || ui.get_appearance_dialog_open()
+                || ui.get_compression_dialog_open()
+            {
+                return;
+            }
+            let Some(archive) = current.lock().unwrap().clone() else {
+                return;
+            };
+            let item = item.to_string();
+            if !archive
+                .directories
+                .get(ui.get_current_directory().as_str())
+                .is_some_and(|entries| entries.iter().any(|entry| entry.path == item))
+            {
+                return;
+            }
+            let version = match ArchiveVersion::read(&archive.path) {
+                Ok(version) => version,
+                Err(error) => {
+                    report(&ui, Err(error), "");
+                    return;
+                }
+            };
+            let cached = prepared_drag
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|prepared| prepared.matches(&archive, &item, &version))
+                .map(|prepared| prepared.path.clone());
+            if let Some(path) = cached {
+                start_prepared_drag(&ui, path, generation);
+                return;
+            }
+            ui.set_busy(true);
+            ui.set_status("正在准备拖出内容，请按住鼠标…".into());
+            let weak = ui.as_weak();
+            let temporary_files = temporary_files.clone();
+            let prepared_drag = prepared_drag.clone();
+            thread::spawn(move || {
+                let progress_ui = weak.clone();
+                let mut last_update = Instant::now();
+                let result = (|| {
+                    let (directory, path) =
+                        extract_temporary_selection(&archive.path, &item, &mut |done, total| {
+                            if last_update.elapsed() < Duration::from_millis(150) {
+                                return;
+                            }
+                            last_update = Instant::now();
+                            let label = format!(
+                                "正在准备拖出内容：{} / {}，请按住鼠标…",
+                                size(done),
+                                size(total)
+                            );
+                            let _ = progress_ui
+                                .upgrade_in_event_loop(move |ui| ui.set_status(label.into()));
+                        })?;
+                    if ArchiveVersion::read(&archive.path)? != version {
+                        bail!("压缩包在解压过程中发生变化，请重新拖动");
+                    }
+                    // File managers can finish copying after QDrag returns. Keep
+                    // the source alive until exit, just like externally opened files.
+                    temporary_files.lock().unwrap().push(directory);
+                    *prepared_drag.lock().unwrap() = Some(PreparedDrag {
+                        archive,
+                        item,
+                        version,
+                        path: path.clone(),
+                    });
+                    Ok(path)
+                })();
+                let _ = weak.upgrade_in_event_loop(move |ui| match result {
+                    Ok(path) => start_prepared_drag(&ui, path, generation),
+                    Err(error) => {
+                        ui.set_busy(false);
+                        report(&ui, Err(error), "");
+                    }
+                });
+            });
         });
     }
     #[cfg(target_os = "macos")]
@@ -1465,6 +1624,164 @@ mod tests {
     use super::*;
 
     #[test]
+    fn drag_gesture_starts_once_and_does_not_open_or_drag_staged_files() -> Result<()> {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        use std::{cell::RefCell, rc::Rc};
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new()?;
+        ui.set_has_archive(true);
+        ui.set_entries(ModelRc::new(slint::VecModel::from(
+            (0..80)
+                .map(|i| ArchiveEntry {
+                    name: format!("{i}.txt").into(),
+                    path: format!("folder/{i}.txt").into(),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let received = requests.clone();
+        ui.on_drag_item(move |item, generation| received.borrow_mut().push((item, generation)));
+        let opened = Rc::new(RefCell::new(0));
+        let received = opened.clone();
+        ui.on_open_item(move |_| *received.borrow_mut() += 1);
+        ui.show()?;
+        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
+
+        // Find a visible row without depending on native menu/font dimensions.
+        let mut row = None;
+        for y in (150..350).step_by(10) {
+            let position = slint::LogicalPosition::new(350.0, y as f32);
+            let generation = ui.get_drag_generation();
+            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            let hit = ui.get_drag_generation() != generation;
+            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+            if hit {
+                row = Some(position);
+                break;
+            }
+        }
+        let row = row.context("未找到可拖动的文件行")?;
+        assert!(
+            requests.borrow().is_empty(),
+            "a click must not prepare extraction"
+        );
+        *opened.borrow_mut() = 0;
+        for offset in [(24.0, 0.0), (0.0, 24.0)] {
+            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                position: row,
+                button: PointerEventButton::Left,
+            });
+            let before = requests.borrow().len();
+            ui.window().dispatch_event(WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(row.x + 2.0, row.y + 2.0),
+            });
+            assert_eq!(requests.borrow().len(), before);
+            for multiplier in [1.0, 2.0] {
+                ui.window().dispatch_event(WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(
+                        row.x + offset.0 * multiplier,
+                        row.y + offset.1 * multiplier,
+                    ),
+                });
+            }
+            assert_eq!(requests.borrow().len(), before + 1);
+            let generation = requests.borrow().last().unwrap().1;
+            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                position: row,
+                button: PointerEventButton::Left,
+            });
+            assert_ne!(
+                ui.get_drag_generation(),
+                generation,
+                "release invalidates pending drag"
+            );
+        }
+        assert_eq!(
+            *opened.borrow(),
+            0,
+            "dragging must not trigger double-click open"
+        );
+        for (staging, busy, button) in [
+            (true, false, PointerEventButton::Left),
+            (false, true, PointerEventButton::Left),
+            (false, false, PointerEventButton::Right),
+        ] {
+            ui.set_staging(staging);
+            ui.set_busy(busy);
+            let before = requests.borrow().len();
+            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                position: row,
+                button,
+            });
+            ui.window().dispatch_event(WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(row.x + 30.0, row.y),
+            });
+            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                position: row,
+                button,
+            });
+            assert_eq!(requests.borrow().len(), before);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_drag_reuses_only_the_same_unchanged_archive_and_entry() -> Result<()> {
+        use std::io::Write;
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("文件.txt");
+        fs::write(&source, b"original")?;
+        let path = dir.path().join("archive.zip");
+        create_archive_from_files(&path, &[source], 6)?;
+        let archive = Arc::new(read_archive(&path)?);
+        let version = ArchiveVersion::read(&path)?;
+        let (temporary, output) = extract_temporary_selection(&path, "文件.txt", &mut |_, _| {})?;
+        let prepared = PreparedDrag {
+            archive: archive.clone(),
+            item: "文件.txt".into(),
+            version: version.clone(),
+            path: output,
+        };
+        assert!(prepared.matches(&archive, "文件.txt", &version));
+        assert!(!prepared.matches(&archive, "other.txt", &version));
+        assert!(!prepared.matches(&Arc::new(read_archive(&path)?), "文件.txt", &version));
+        OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(b"changed")?;
+        assert!(!prepared.matches(&archive, "文件.txt", &ArchiveVersion::read(&path)?));
+        drop(temporary);
+        assert!(!prepared.matches(&archive, "文件.txt", &version));
+        Ok(())
+    }
+
+    #[test]
+    fn prepares_empty_unicode_directory_and_rejects_missing_drag_items() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let archive = dir.path().join("empty.zip");
+        let mut writer = ZipWriter::new(File::create(&archive)?);
+        writer.add_directory("top/空 文件夹/", SimpleFileOptions::default())?;
+        writer.finish()?;
+        let (temporary, folder) =
+            extract_temporary_selection(&archive, "top/空 文件夹/", &mut |_, _| {})?;
+        assert_eq!(folder, temporary.path().join("空 文件夹"));
+        assert!(folder.is_dir());
+        assert_eq!(fs::read_dir(&folder)?.count(), 0);
+        for selection in ["", "missing.txt", "missing/"] {
+            assert!(extract_temporary_selection(&archive, selection, &mut |_, _| {}).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn create_zip_from_dropped_files_without_overwriting() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let first = dir.path().join("a.txt");
@@ -1479,7 +1796,7 @@ mod tests {
         assert_eq!(contents, "first");
         assert_eq!(zip.len(), 2);
         let before = fs::read(&archive)?;
-        assert!(create_archive_from_files(&archive, &[first.clone()], 6).is_err());
+        assert!(create_archive_from_files(&archive, std::slice::from_ref(&first), 6).is_err());
         assert_eq!(fs::read(&archive)?, before);
         let other = dir.path().join("other");
         fs::create_dir(&other)?;
@@ -1492,7 +1809,7 @@ mod tests {
             .any(|entry| entry.name == "a.txt"));
         assert!(staged.directories["other/empty/"].is_empty());
         let folder_zip = dir.path().join("folder.zip");
-        create_archive_from_files(&folder_zip, &[other.clone()], 0)?;
+        create_archive_from_files(&folder_zip, std::slice::from_ref(&other), 0)?;
         let mut zip = ZipArchive::new(File::open(folder_zip)?)?;
         assert!(zip.by_name("other/empty/")?.is_dir());
         assert_eq!(zip.by_name("other/a.txt")?.size(), 9);
@@ -1729,6 +2046,17 @@ mod tests {
             );
             assert!(!output.join("directory").exists());
             assert!(extract_selection(&path, &output, Some("missing/")).is_err());
+            let (temporary, dragged) =
+                extract_temporary_selection(&path, "top/dir/", &mut |_, _| {})?;
+            assert_eq!(dragged, temporary.path().join("dir"));
+            assert_eq!(fs::read(dragged.join("file.txt"))?, names[0].as_bytes());
+            assert_eq!(
+                fs::read(dragged.join("nested/other.txt"))?,
+                names[1].as_bytes()
+            );
+            assert_eq!(fs::read_dir(temporary.path())?.count(), 1);
+            drop(temporary);
+            assert!(!dragged.exists());
         }
         Ok(())
     }

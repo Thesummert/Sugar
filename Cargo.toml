@@ -7,10 +7,12 @@ build = "build.rs"
 [dependencies]
 anyhow = "1"
 bzip2 = "0.5"
+cpp = "0.5"
 flate2 = "1"
 rfd = "0.15"
+qttypes = "0.2"
 sevenz-rust2 = "0.20"
-slint = { version = "1.18", features = ["unstable-winit-030"] }
+slint = { version = "1.18", features = ["backend-qt"] }
 tar = "0.4"
 tempfile = "3"
 xz2 = "0.1"
@@ -22,4 +24,8 @@ objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder"] }
 objc2-foundation = { version = "0.2", features = ["NSAppleEventDescriptor", "NSAppleEventManager", "NSObject", "NSString", "NSURL"] }
 
 [build-dependencies]
+cpp_build = "0.5"
 slint-build = "1.18"
+
+[dev-dependencies]
+i-slint-backend-testing = "1.18"
