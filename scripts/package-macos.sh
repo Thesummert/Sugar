@@ -34,6 +34,11 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$project_dir/target/release/sugar-archive" "$app/Contents/MacOS/sugar-archive"
 cp "$project_dir/macos/Info.plist" "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
+# Qt builds using dylibs can reference @rpath without the Rust linker adding
+# an rpath. Point dyld at the libraries placed in the bundle by macdeployqt.
+if ! otool -l "$app/Contents/MacOS/sugar-archive" | grep -Fq '@executable_path/../Frameworks'; then
+    install_name_tool -add_rpath '@executable_path/../Frameworks' "$app/Contents/MacOS/sugar-archive"
+fi
 "$qt_bin_dir/macdeployqt" "$app" -always-overwrite
 codesign --force --deep --sign - "$app"
 echo "已生成：$app"
