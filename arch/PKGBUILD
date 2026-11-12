@@ -37,6 +37,7 @@ check() {
 package() {
     cd "$srcdir/$pkgname-$pkgver"
     install -Dm755 "$srcdir/target/release/sugar-archive" "$pkgdir/usr/bin/sugar-archive"
+    ln -s sugar-archive "$pkgdir/usr/bin/sugar-archive-pudding"
     install -Dm644 linux/com.sugararchive.app.desktop \
         "$pkgdir/usr/share/applications/com.sugararchive.app.desktop"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"

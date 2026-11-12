@@ -1092,7 +1092,50 @@ fn start_prepared_drag(ui: &AppWindow, path: PathBuf, generation: i32) {
     });
 }
 
+// The installed helper has a distinct name so older Sugar releases are never
+// accidentally launched as a GUI while Pudding checks for CLI support.
+fn pudding_cli(args: &[std::ffi::OsString]) -> Result<()> {
+    let action = args.first().and_then(|s| s.to_str()).context("缺少操作")?;
+    match action {
+        "--protocol-version" if args.len() == 1 => println!("sugar-pudding-2"),
+        "extract" if args.len() == 3 => {
+            let archive = Path::new(&args[1]);
+            let destination = Path::new(&args[2]);
+            if !destination.is_dir() {
+                bail!("解压目标不是文件夹");
+            }
+            extract_selection_with_progress(archive, destination, None, &mut |_, _| {})?;
+        }
+        "stage" if args.len() >= 2 => {
+            std::process::Command::new(std::env::current_exe()?)
+                .arg("--pudding-stage")
+                .args(&args[1..])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .context("无法启动 Sugar")?;
+        }
+        "compress" if args.len() >= 3 => {
+            let destination = Path::new(&args[1]);
+            let sources: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
+            create_archive_from_files(destination, &sources, 6)?;
+        }
+        _ => bail!("无效的操作参数"),
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
+    let args: Vec<_> = std::env::args_os().collect();
+    if args
+        .first()
+        .and_then(|s| Path::new(s).file_stem())
+        .and_then(|s| s.to_str())
+        == Some("sugar-archive-pudding")
+    {
+        return pudding_cli(&args[1..]);
+    }
     slint::BackendSelector::new()
         .backend_name("qt".into())
         .select()?;
@@ -1605,8 +1648,29 @@ fn main() -> Result<()> {
             });
         });
     }
-    // Desktop launchers pass a local archive path through their %f field code.
-    if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) {
+    // Pudding can stage several sources before opening the compression dialog.
+    if args.get(1).is_some_and(|arg| arg == "--pudding-stage") {
+        let sources: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
+        ui.set_busy(true);
+        ui.set_status("正在读取待压缩文件…".into());
+        let weak = ui.as_weak();
+        thread::spawn(move || {
+            let result = stage_archive_inputs(sources);
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                ui.set_busy(false);
+                match result {
+                    Ok(data) => {
+                        let archive = Arc::new(data);
+                        *current.lock().unwrap() = Some(archive.clone());
+                        show_archive(&ui, archive, false);
+                        ui.invoke_compress_files();
+                    }
+                    Err(error) => report(&ui, Err(error), ""),
+                }
+            });
+        });
+    } else if let Some(path) = args.get(1).map(PathBuf::from) {
+        // Desktop launchers pass a local archive path through their %f field code.
         run_job(
             &ui,
             current,
@@ -1622,6 +1686,27 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pudding_cli_round_trip_and_no_overwrite() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("hello.txt");
+        let archive = dir.path().join("archive.zip");
+        let out = dir.path().join("out");
+        fs::write(&input, "hello")?;
+        fs::create_dir(&out)?;
+        let args = |action: &str, paths: &[&Path]| -> Vec<std::ffi::OsString> {
+            std::iter::once(std::ffi::OsString::from(action))
+                .chain(paths.iter().map(|p| p.as_os_str().to_owned()))
+                .collect()
+        };
+        pudding_cli(&args("compress", &[&archive, &input]))?;
+        assert!(pudding_cli(&args("compress", &[&archive, &input])).is_err());
+        pudding_cli(&args("extract", &[&archive, &out]))?;
+        assert_eq!(fs::read(out.join("hello.txt"))?, b"hello");
+        assert!(pudding_cli(&args("extract", &[&archive, &out])).is_err());
+        Ok(())
+    }
 
     #[test]
     fn drag_gesture_starts_once_and_does_not_open_or_drag_staged_files() -> Result<()> {

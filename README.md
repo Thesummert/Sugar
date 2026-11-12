@@ -58,3 +58,5 @@ xdg-mime default com.sugararchive.app.desktop application/zip application/x-7z-c
 - 打开、添加和解压在后台执行，文件列表按需渲染。
 
 解压前会检查路径和目标文件，避免覆盖已有文件。暂不支持 RAR、独立的 GZ/BZ2/XZ 文件、加密压缩包、链接或特殊文件的解压、向已有压缩包添加文件夹及删除条目。拖入打包时不支持符号链接或特殊文件。TAR 文件名需要是 UTF-8。TAR 类格式浏览时需要顺序读取压缩数据，因此大压缩包可能需要较长时间；解压失败时可能留下已解压的文件。主题设置不会跨次运行保存。
+
+Pudding 联动需要重新构建并安装 Sugar。安装包提供 `sugar-archive-pudding` 辅助命令，供 Pudding 执行压缩和解压；旧版 Sugar 不提供此接口。

@@ -32,6 +32,7 @@ app="$project_dir/target/macos/Sugar Archive.app"
 cargo build --release --locked
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$project_dir/target/release/sugar-archive" "$app/Contents/MacOS/sugar-archive"
+ln -sf sugar-archive "$app/Contents/MacOS/sugar-archive-pudding"
 cp "$project_dir/macos/Info.plist" "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
 # Qt builds using dylibs can reference @rpath without the Rust linker adding
