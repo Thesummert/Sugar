@@ -29,7 +29,7 @@ source_name="sugar-archive-$version"
 archive="$package_dir/$source_name.tar.gz"
 # Include the working tree so packaging also works before changes are committed.
 tar -czf "$archive" --transform "s,^,$source_name/," -C "$project_dir" \
-    Cargo.toml Cargo.lock build.rs src ui linux README.md LICENSE
+    Cargo.toml Cargo.lock build.rs src ui linux tests README.md LICENSE
 checksum=$(sha256sum "$archive")
 checksum=${checksum%% *}
 sed -e "s/^pkgver=.*/pkgver=$version/" \

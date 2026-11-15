@@ -7,7 +7,7 @@ arch=('x86_64' 'aarch64')
 url='https://github.com/Thesummert/Sugar'
 license=('GPL-3.0-only')
 depends=('bzip2' 'desktop-file-utils' 'fontconfig' 'gcc-libs' 'glibc' 'libglvnd' 'libx11'
-         'libxcursor' 'libxi' 'libxkbcommon' 'libxkbcommon-x11' 'libxrandr'
+         'libarchive' 'libxcursor' 'libxi' 'libxkbcommon' 'libxkbcommon-x11' 'libxrandr'
          'qt6-base' 'qt6-wayland' 'shared-mime-info' 'wayland' 'xdg-desktop-portal' 'xdg-utils' 'xz')
 makedepends=('cargo' 'pkgconf')
 optdepends=('xdg-desktop-portal-gtk: GTK file chooser portal backend'

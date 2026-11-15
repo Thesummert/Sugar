@@ -65,6 +65,7 @@ export component AppWindow inherits Window {
     in-out property <string> compression-name: "";
     in-out property <string> compression-destination: "";
     in-out property <int> compression-level: 6;
+    in-out property <string> compression-format: "zip";
     in-out property <bool> progress-dialog-open: false;
     in-out property <float> extract-progress: 0;
     in-out property <string> extract-progress-text: "正在准备…";
@@ -260,13 +261,20 @@ export component AppWindow inherits Window {
         width: parent.width; height: parent.height; background: #00000088;
         TouchArea { }
         Rectangle {
-            width: min(520px, parent.width - 48px); height: 440px;
+            width: min(520px, parent.width - 48px); height: 480px;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             border-radius: 14px; background: root.panel;
             VerticalLayout {
                 padding: 24px; spacing: 10px;
                 Text { text: "压缩选项"; color: root.text-main; font-size: 19px; font-weight: 700; height: 26px; }
-                Text { text: "压缩格式：ZIP"; color: root.muted; font-size: 12px; height: 20px; }
+                Text { text: "压缩格式"; color: root.text-main; font-size: 12px; font-weight: 600; height: 18px; }
+                HorizontalLayout {
+                    height: 34px; spacing: 4px;
+                    for format in ["zip", "7z", "tar", "tar.gz", "tar.bz2", "tar.xz"] : ActionButton {
+                        label: format; primary: root.compression-format == format; fg: root.text-main; surface: root.soft;
+                        clicked => { root.compression-format = format; }
+                    }
+                }
                 Text { text: "压缩包名称"; color: root.text-main; font-size: 12px; font-weight: 600; height: 18px; }
                 LineEdit { height: 38px; text <=> root.compression-name; placeholder-text: "输入压缩包名称"; }
                 Text { text: "保存位置"; color: root.text-main; font-size: 12px; font-weight: 600; height: 18px; }
@@ -278,12 +286,12 @@ export component AppWindow inherits Window {
                 Text { text: "压缩程度"; color: root.text-main; font-size: 12px; font-weight: 600; height: 18px; }
                 HorizontalLayout {
                     height: 38px; spacing: 8px;
-                    ActionButton { label: "仅存储"; primary: root.compression-level == 0; fg: root.text-main; surface: root.soft; clicked => { root.compression-level = 0; } }
+                    ActionButton { label: "仅存储"; enabled: root.compression-format == "zip" || root.compression-format == "7z"; primary: root.compression-level == 0; fg: root.text-main; surface: root.soft; clicked => { root.compression-level = 0; } }
                     ActionButton { label: "快速"; primary: root.compression-level == 1; fg: root.text-main; surface: root.soft; clicked => { root.compression-level = 1; } }
                     ActionButton { label: "标准"; primary: root.compression-level == 6; fg: root.text-main; surface: root.soft; clicked => { root.compression-level = 6; } }
                     ActionButton { label: "较小"; primary: root.compression-level == 9; fg: root.text-main; surface: root.soft; clicked => { root.compression-level = 9; } }
                 }
-                Text { text: "较高压缩程度可能需要更长时间"; color: root.muted; font-size: 11px; height: 18px; }
+                Text { text: root.compression-format == "tar" ? "TAR 不压缩数据" : root.compression-format == "tar.bz2" && root.compression-level == 0 ? "TAR.BZ2 使用最低压缩程度" : "较高压缩程度可能需要更长时间"; color: root.muted; font-size: 11px; height: 18px; }
                 Rectangle { vertical-stretch: 1; }
                 HorizontalLayout {
                     height: 38px; spacing: 10px;

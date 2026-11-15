@@ -15,6 +15,7 @@ use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 slint::include_modules!();
 
 mod native_drag;
+mod rar;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -164,6 +165,7 @@ impl Model for TreeModel {
 enum ArchiveFormat {
     Zip,
     SevenZip,
+    Rar,
     Tar,
     TarGz,
     TarBz2,
@@ -181,6 +183,8 @@ impl ArchiveFormat {
             Ok(Self::Zip)
         } else if name.ends_with(".7z") {
             Ok(Self::SevenZip)
+        } else if name.ends_with(".rar") {
+            Ok(Self::Rar)
         } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
             Ok(Self::TarGz)
         } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") || name.ends_with(".tbz") {
@@ -252,6 +256,14 @@ fn list_files(path: &Path, format: ArchiveFormat) -> Result<Vec<FileInfo>> {
             }
             Ok(files)
         }
+        ArchiveFormat::Rar => {
+            let mut reader = rar::Reader::open(path)?;
+            let mut files = Vec::new();
+            while let Some(entry) = reader.next()? {
+                files.push(entry);
+            }
+            Ok(files)
+        }
         ArchiveFormat::SevenZip => {
             let reader = sevenz_rust2::ArchiveReader::open(path, sevenz_rust2::Password::empty())?;
             reader
@@ -261,7 +273,9 @@ fn list_files(path: &Path, format: ArchiveFormat) -> Result<Vec<FileInfo>> {
                 .filter(|entry| !(entry.name().is_empty() && entry.is_directory()))
                 .map(|entry| {
                     let mode = (entry.windows_attributes >> 16) & 0xf000;
-                    if entry.is_anti_item || (mode != 0 && mode != 0x8000 && mode != 0x4000) {
+                    if entry.is_anti_item
+                        || (mode != 0 && mode != 0x8000 && mode != 0x4000 && mode != 0xa000)
+                    {
                         bail!("暂不支持特殊文件：{}", entry.name());
                     }
                     Ok(FileInfo {
@@ -283,7 +297,7 @@ fn list_files(path: &Path, format: ArchiveFormat) -> Result<Vec<FileInfo>> {
                 if name.is_empty() && kind.is_dir() {
                     continue;
                 }
-                if !kind.is_dir() && !kind.is_file() {
+                if !kind.is_dir() && !kind.is_file() && !kind.is_symlink() {
                     bail!("暂不支持链接或特殊文件：{name}");
                 }
                 files.push(FileInfo {
@@ -476,6 +490,7 @@ struct SourceEntry {
     name: String,
     directory: bool,
     size: u64,
+    symlink: Option<String>,
 }
 
 fn collect_archive_inputs(files: &[PathBuf]) -> Result<Vec<SourceEntry>> {
@@ -501,8 +516,20 @@ fn collect_archive_inputs(files: &[PathBuf]) -> Result<Vec<SourceEntry>> {
     while let Some((path, name)) = pending.pop() {
         let metadata =
             fs::symlink_metadata(&path).with_context(|| format!("无法读取 {}", path.display()))?;
-        if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
-            bail!("暂不支持符号链接或特殊文件：{}", path.display());
+        let symlink = if metadata.file_type().is_symlink() {
+            Some(
+                fs::read_link(&path)?
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| {
+                        anyhow::anyhow!("符号链接目标不是有效的 UTF-8：{}", path.display())
+                    })?,
+            )
+        } else {
+            None
+        };
+        if symlink.is_none() && !metadata.is_dir() && !metadata.is_file() {
+            bail!("暂不支持特殊文件：{}", path.display());
         }
         let directory = metadata.is_dir();
         if directory {
@@ -525,6 +552,7 @@ fn collect_archive_inputs(files: &[PathBuf]) -> Result<Vec<SourceEntry>> {
             name: if directory { format!("{name}/") } else { name },
             directory,
             size: metadata.len(),
+            symlink,
         });
     }
     Ok(entries)
@@ -550,31 +578,100 @@ fn stage_archive_inputs(files: Vec<PathBuf>) -> Result<ArchiveData> {
 }
 
 fn create_archive_from_files(path: &Path, files: &[PathBuf], level: i32) -> Result<()> {
+    if ![0, 1, 6, 9].contains(&level) {
+        bail!("无效的压缩程度");
+    }
+    let format = ArchiveFormat::detect(path)?;
+    if format == ArchiveFormat::Rar {
+        bail!("暂不支持创建 RAR 压缩包");
+    }
     let entries = collect_archive_inputs(files)?;
-    let options = match level {
-        0 => SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
-        1 | 6 | 9 => SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated)
-            .compression_level(Some(level.into())),
-        _ => bail!("无效的压缩程度"),
-    };
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    {
-        let mut writer = ZipWriter::new(&mut temp);
-        for entry in entries {
-            if entry.directory {
-                writer.add_directory(&entry.name, options)?;
-                continue;
+    match format {
+        ArchiveFormat::Zip => {
+            let options = if level == 0 {
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored)
+            } else {
+                SimpleFileOptions::default()
+                    .compression_method(CompressionMethod::Deflated)
+                    .compression_level(Some(level.into()))
+            };
+            let mut writer = ZipWriter::new(&mut temp);
+            for entry in entries {
+                if let Some(target) = entry.symlink {
+                    writer.add_symlink(&entry.name, target, options)?;
+                } else if entry.directory {
+                    writer.add_directory(&entry.name, options)?;
+                } else {
+                    writer.start_file(&entry.name, options)?;
+                    io::copy(
+                        &mut File::open(&entry.path)
+                            .with_context(|| format!("无法读取 {}", entry.path.display()))?,
+                        &mut writer,
+                    )?;
+                }
             }
-            writer.start_file(&entry.name, options)?;
-            io::copy(
-                &mut File::open(&entry.path)
-                    .with_context(|| format!("无法读取 {}", entry.path.display()))?,
-                &mut writer,
-            )?;
+            writer.finish()?;
         }
-        writer.finish()?;
+        ArchiveFormat::SevenZip => {
+            let mut writer = sevenz_rust2::ArchiveWriter::new(&mut temp)?;
+            if level == 0 {
+                writer.set_content_methods(vec![sevenz_rust2::EncoderMethod::COPY.into()]);
+            } else {
+                writer.set_content_methods(vec![
+                    sevenz_rust2::encoder_options::Lzma2Options::from_level(level as u32).into(),
+                ]);
+            }
+            for entry in entries {
+                let mut item = if entry.directory {
+                    sevenz_rust2::ArchiveEntry::new_directory(entry.name.trim_end_matches('/'))
+                } else {
+                    sevenz_rust2::ArchiveEntry::new_file(&entry.name)
+                };
+                // sevenz-rust2 0.20 writes the anti-item bit inverted for empty streams.
+                // Directories have no stream, so set this to produce a normal directory.
+                if entry.directory {
+                    item.is_anti_item = true;
+                }
+                if let Some(target) = entry.symlink {
+                    item.has_windows_attributes = true;
+                    item.windows_attributes = (0o120777 << 16) | 0x8000;
+                    writer.push_archive_entry(item, Some(io::Cursor::new(target.into_bytes())))?;
+                } else if entry.directory {
+                    writer.push_archive_entry::<File>(item, None)?;
+                } else {
+                    writer.push_archive_entry(
+                        item,
+                        Some(
+                            File::open(&entry.path)
+                                .with_context(|| format!("无法读取 {}", entry.path.display()))?,
+                        ),
+                    )?;
+                }
+            }
+            writer.finish()?;
+        }
+        ArchiveFormat::Tar => {
+            write_tar(&mut temp, entries)?;
+        }
+        ArchiveFormat::TarGz => {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut temp, flate2::Compression::new(level as u32));
+            write_tar(encoder, entries)?.finish()?;
+        }
+        ArchiveFormat::TarBz2 => {
+            let encoder = bzip2::write::BzEncoder::new(
+                &mut temp,
+                bzip2::Compression::new((level as u32).max(1)),
+            );
+            write_tar(encoder, entries)?.finish()?;
+        }
+        ArchiveFormat::TarXz => {
+            let encoder = xz2::write::XzEncoder::new(&mut temp, level as u32);
+            write_tar(encoder, entries)?.finish()?;
+        }
+        ArchiveFormat::Rar => unreachable!(),
     }
     temp.persist_noclobber(path)
         .map_err(|error| error.error)
@@ -582,7 +679,25 @@ fn create_archive_from_files(path: &Path, files: &[PathBuf], level: i32) -> Resu
     Ok(())
 }
 
-fn compression_target(destination: &Path, name: &str) -> Result<PathBuf> {
+fn write_tar<W: io::Write>(output: W, entries: Vec<SourceEntry>) -> Result<W> {
+    let mut writer = tar::Builder::new(output);
+    for entry in entries {
+        if let Some(target) = entry.symlink {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            writer.append_link(&mut header, &entry.name, target)?;
+        } else if entry.directory {
+            writer.append_dir(&entry.name, &entry.path)?;
+        } else {
+            writer.append_file(&entry.name, &mut File::open(&entry.path)?)?;
+        }
+    }
+    Ok(writer.into_inner()?)
+}
+
+fn compression_target(destination: &Path, name: &str, format: &str) -> Result<PathBuf> {
     if !destination.is_dir() {
         bail!("保存位置不是已有文件夹：{}", destination.display());
     }
@@ -594,10 +709,24 @@ fn compression_target(destination: &Path, name: &str) -> Result<PathBuf> {
     {
         bail!("压缩包名称无效");
     }
-    let name = if name.to_ascii_lowercase().ends_with(".zip") {
+    if !["zip", "7z", "tar", "tar.gz", "tar.bz2", "tar.xz"].contains(&format) {
+        bail!("不支持的压缩格式");
+    }
+    let lower = name.to_ascii_lowercase();
+    let suffix = format!(".{format}");
+    let name = if lower.ends_with(&suffix) {
         name.to_owned()
     } else {
-        format!("{name}.zip")
+        if [
+            ".zip", ".7z", ".rar", ".tar", ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tbz",
+            ".tbz2", ".txz",
+        ]
+        .iter()
+        .any(|s| lower.ends_with(s))
+        {
+            bail!("文件扩展名与所选压缩格式不一致");
+        }
+        format!("{name}{suffix}")
     };
     Ok(destination.join(name))
 }
@@ -628,10 +757,20 @@ fn add_files(path: &Path, directory: &str, files: &[PathBuf]) -> Result<()> {
     let mut writer = ZipWriter::new_append(temp.reopen()?)?;
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for file in files {
-        writer.start_file(
-            format!("{directory}{}", file.file_name().unwrap().to_str().unwrap()),
-            options,
-        )?;
+        let name = format!("{directory}{}", file.file_name().unwrap().to_str().unwrap());
+        let metadata = fs::symlink_metadata(file)?;
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(file)?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("符号链接目标不是有效的 UTF-8：{}", file.display()))?;
+            writer.add_symlink(name, target, options)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            bail!("暂不支持添加文件夹或特殊文件：{}", file.display());
+        }
+        writer.start_file(name, options)?;
         io::copy(
             &mut File::open(file).with_context(|| format!("无法读取 {}", file.display()))?,
             &mut writer,
@@ -868,9 +1007,46 @@ fn extract_selection_with_progress(
                 )?;
             }
         }
+        ArchiveFormat::Rar => {
+            let mut reader = rar::Reader::open(path)?;
+            let mut index = 0;
+            while let Some(entry) = reader.next()? {
+                let expected = files.get(index).context("压缩包在解压过程中发生变化")?;
+                if entry.name != expected.name
+                    || entry.directory != expected.directory
+                    || entry.size != expected.size
+                {
+                    bail!("压缩包在解压过程中发生变化");
+                }
+                if let Some(target) = &targets[index] {
+                    let mut input = ProgressReader {
+                        reader: &mut reader,
+                        completed: &mut completed,
+                        total,
+                        progress,
+                    };
+                    write_extracted(target, expected.directory, &mut input)?;
+                }
+                index += 1;
+            }
+            if index != files.len() {
+                bail!("压缩包在解压过程中发生变化");
+            }
+        }
         ArchiveFormat::SevenZip => {
             let mut reader =
                 sevenz_rust2::ArchiveReader::open(path, sevenz_rust2::Password::empty())?;
+            for (entry, target) in reader
+                .archive()
+                .files
+                .iter()
+                .filter(|e| !(e.name().is_empty() && e.is_directory()))
+                .zip(&targets)
+            {
+                if target.is_some() && (entry.windows_attributes >> 16) & 0xf000 == 0xa000 {
+                    bail!("暂不支持解压符号链接：{}", entry.name());
+                }
+            }
             let mut expected: HashMap<&str, VecDeque<(Option<&PathBuf>, bool)>> = HashMap::new();
             for (entry, target) in files.iter().zip(&targets) {
                 expected
@@ -919,11 +1095,14 @@ fn extract_selection_with_progress(
                 let kind = entry.header().entry_type();
                 if name != expected.name
                     || (expected.directory && !kind.is_dir())
-                    || (!expected.directory && !kind.is_file())
+                    || (!expected.directory && !kind.is_file() && !kind.is_symlink())
                 {
                     bail!("压缩包在解压过程中发生变化");
                 }
                 if let Some(target) = &targets[index] {
+                    if kind.is_symlink() {
+                        bail!("暂不支持解压符号链接：{name}");
+                    }
                     let mut reader = ProgressReader {
                         reader: &mut entry,
                         completed: &mut completed,
@@ -969,6 +1148,7 @@ fn archive_folder_name(path: &Path) -> String {
     let lower = filename.to_lowercase();
     let suffixes = [
         ".tar.bz2", ".tar.gz", ".tar.xz", ".tbz2", ".tgz", ".tbz", ".txz", ".zip", ".tar", ".7z",
+        ".rar",
     ];
     let name = suffixes
         .iter()
@@ -1306,16 +1486,17 @@ fn main() -> Result<()> {
             };
             let name = if files.len() == 1 {
                 format!(
-                    "{}.zip",
+                    "{}",
                     files[0].file_name().unwrap_or_default().to_string_lossy()
                 )
             } else {
-                "新建压缩包.zip".to_owned()
+                "新建压缩包".to_owned()
             };
             let destination = files[0].parent().unwrap_or_else(|| Path::new("."));
             ui.set_compression_name(name.into());
             ui.set_compression_destination(destination.to_string_lossy().to_string().into());
             ui.set_compression_level(6);
+            ui.set_compression_format("zip".into());
             ui.set_compression_dialog_open(true);
         });
     }
@@ -1351,7 +1532,11 @@ fn main() -> Result<()> {
             };
             let destination = ui.get_compression_destination().to_string();
             let name = ui.get_compression_name().to_string();
-            let path = match compression_target(Path::new(&destination), &name) {
+            let path = match compression_target(
+                Path::new(&destination),
+                &name,
+                ui.get_compression_format().as_str(),
+            ) {
                 Ok(path) => path,
                 Err(error) => {
                     report(&ui, Err(error), "");
@@ -1413,7 +1598,7 @@ fn main() -> Result<()> {
                 .add_filter(
                     "支持的压缩包",
                     &[
-                        "zip", "7z", "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz",
+                        "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz",
                     ],
                 )
                 .pick_file()
@@ -1685,6 +1870,120 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn creates_and_extracts_all_writable_formats() -> anyhow::Result<()> {
+        use std::{fs, path::Path};
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("input");
+        fs::create_dir(&input)?;
+        fs::create_dir(input.join("empty"))?;
+        fs::write(input.join("data.txt"), b"archive content")?;
+        for format in ["zip", "7z", "tar", "tar.gz", "tar.bz2", "tar.xz"] {
+            let path = super::compression_target(dir.path(), "archive", format)?;
+            super::create_archive_from_files(&path, std::slice::from_ref(&input), 6)?;
+            super::read_archive(&path)?;
+            let out = dir.path().join(format!("out-{format}"));
+            fs::create_dir(&out)?;
+            super::extract_archive(&path, &out)?;
+            assert_eq!(
+                fs::read(out.join("input/data.txt"))?,
+                b"archive content",
+                "{format}"
+            );
+            assert!(out.join("input/empty").is_dir(), "{format}");
+            assert!(
+                super::create_archive_from_files(&path, std::slice::from_ref(&input), 6).is_err()
+            );
+        }
+        assert!(super::compression_target(Path::new(dir.path()), "archive.zip", "7z").is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn additional_formats_preserve_symlinks() -> anyhow::Result<()> {
+        use std::fs;
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("input");
+        fs::create_dir(&input)?;
+        fs::write(input.join("data"), b"hello")?;
+        std::os::unix::fs::symlink("../missing", input.join("link"))?;
+        for format in ["7z", "tar", "tar.gz", "tar.bz2", "tar.xz"] {
+            let path = super::compression_target(dir.path(), "links", format)?;
+            super::create_archive_from_files(&path, std::slice::from_ref(&input), 6)?;
+            super::read_archive(&path)?;
+            if format == "7z" {
+                let archive =
+                    sevenz_rust2::ArchiveReader::open(&path, sevenz_rust2::Password::empty())?;
+                let link = archive
+                    .archive()
+                    .files
+                    .iter()
+                    .find(|e| e.name() == "input/link")
+                    .unwrap();
+                assert_eq!((link.windows_attributes >> 16) & 0xf000, 0xa000);
+            } else {
+                let format = super::ArchiveFormat::detect(&path)?;
+                let mut tar = tar::Archive::new(super::tar_reader(&path, format)?);
+                let mut found = false;
+                for entry in tar.entries()? {
+                    let entry = entry?;
+                    if entry.path()? == std::path::Path::new("input/link") {
+                        assert!(entry.header().entry_type().is_symlink());
+                        assert_eq!(
+                            entry.link_name()?.unwrap(),
+                            std::path::Path::new("../missing")
+                        );
+                        found = true;
+                    }
+                }
+                assert!(found);
+            }
+            let out = dir.path().join(format!("link-out-{format}"));
+            fs::create_dir(&out)?;
+            assert!(super::extract_selection(&path, &out, Some("input/link")).is_err());
+            super::extract_selection(&path, &out, Some("input/data"))?;
+            assert_eq!(fs::read(out.join("data"))?, b"hello");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rar_browse_and_extract() -> anyhow::Result<()> {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/stored.rar"
+        ));
+        let files = super::list_files(path, super::ArchiveFormat::detect(path)?)?;
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "hello.txt");
+        let dir = tempfile::tempdir()?;
+        super::extract_archive(path, dir.path())?;
+        assert_eq!(std::fs::read(dir.path().join("hello.txt"))?, b"hello rar\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zip_preserves_symlinks_without_following_them() -> anyhow::Result<()> {
+        use std::io::Read;
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("input");
+        std::fs::create_dir(&input)?;
+        std::os::unix::fs::symlink("../missing", input.join("link"))?;
+        std::os::unix::fs::symlink(".", input.join("loop"))?;
+        let archive = dir.path().join("test.zip");
+        super::create_archive_from_files(&archive, &[input], 6)?;
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?)?;
+        assert_eq!(zip.len(), 3);
+        let mut link = zip.by_name("input/link")?;
+        assert!(link.is_symlink());
+        let mut target = String::new();
+        link.read_to_string(&mut target)?;
+        assert_eq!(target, "../missing");
+        Ok(())
+    }
+
     use super::*;
 
     #[test]
@@ -1905,7 +2204,7 @@ mod tests {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&first, other.join("link"))?;
-            assert!(stage_archive_inputs(vec![other.clone()]).is_err());
+            assert!(stage_archive_inputs(vec![other.clone()]).is_ok());
         }
         assert!(create_archive_from_files(
             &dir.path().join("duplicate.zip"),
@@ -1922,17 +2221,20 @@ mod tests {
         let input = dir.path().join("input.txt");
         fs::write(&input, vec![b'a'; 4096])?;
         assert_eq!(
-            compression_target(dir.path(), "归档")?,
+            compression_target(dir.path(), "归档", "zip")?,
             dir.path().join("归档.zip")
         );
         assert_eq!(
-            compression_target(dir.path(), "归档.ZIP")?,
+            compression_target(dir.path(), "归档.ZIP", "zip")?,
             dir.path().join("归档.ZIP")
         );
         for name in ["", "..", "../escape", "folder/", "folder\\file"] {
-            assert!(compression_target(dir.path(), name).is_err(), "{name}");
+            assert!(
+                compression_target(dir.path(), name, "zip").is_err(),
+                "{name}"
+            );
         }
-        assert!(compression_target(&dir.path().join("missing"), "a").is_err());
+        assert!(compression_target(&dir.path().join("missing"), "a", "zip").is_err());
         for level in [1, 6, 9] {
             let path = dir.path().join(format!("{level}.zip"));
             create_archive_from_files(&path, std::slice::from_ref(&input), level)?;
