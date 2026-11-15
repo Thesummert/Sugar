@@ -1,7 +1,14 @@
-use anyhow::{bail, Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{bail, Result};
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::{
-    ffi::{c_char, c_int, c_void, CStr, CString},
+    ffi::{c_char, c_int, c_void, CStr},
     io::{self, Read},
     path::Path,
 };
@@ -11,7 +18,10 @@ extern "C" {
     fn archive_read_new() -> *mut c_void;
     fn archive_read_support_format_rar(a: *mut c_void) -> c_int;
     fn archive_read_support_format_rar5(a: *mut c_void) -> c_int;
+    #[cfg(unix)]
     fn archive_read_open_filename(a: *mut c_void, name: *const c_char, block: usize) -> c_int;
+    #[cfg(windows)]
+    fn archive_read_open_filename_w(a: *mut c_void, name: *const u16, block: usize) -> c_int;
     fn archive_read_next_header(a: *mut c_void, entry: *mut *mut c_void) -> c_int;
     fn archive_read_data(a: *mut c_void, buffer: *mut c_void, size: usize) -> isize;
     fn archive_read_free(a: *mut c_void) -> c_int;
@@ -37,15 +47,29 @@ impl Reader {
         }
     }
     pub fn open(path: &Path) -> Result<Self> {
+        #[cfg(unix)]
         let name = CString::new(path.as_os_str().as_bytes()).context("文件路径无效")?;
+        #[cfg(windows)]
+        let name = {
+            let mut name: Vec<u16> = path.as_os_str().encode_wide().collect();
+            if name.contains(&0) {
+                bail!("文件路径无效");
+            }
+            name.push(0);
+            name
+        };
         unsafe {
             let reader = Self(archive_read_new());
             if reader.0.is_null() {
                 bail!("无法创建 RAR 读取器");
             }
+            #[cfg(unix)]
+            let open = || archive_read_open_filename(reader.0, name.as_ptr(), 10240);
+            #[cfg(windows)]
+            let open = || archive_read_open_filename_w(reader.0, name.as_ptr(), 10240);
             if archive_read_support_format_rar(reader.0) != 0
                 || archive_read_support_format_rar5(reader.0) != 0
-                || archive_read_open_filename(reader.0, name.as_ptr(), 10240) != 0
+                || open() != 0
             {
                 bail!("无法读取 RAR 压缩包：{}", reader.error());
             }

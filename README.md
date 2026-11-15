@@ -12,6 +12,24 @@ cargo run --release
 
 应用使用 Qt 窗口后端提供系统原生文件拖放，Linux 支持 Wayland 和 X11。构建时需要能找到 `qmake6` 或 `qmake`，也可通过 `QMAKE` 环境变量指定路径。构建和运行还需要 libarchive（macOS 自带）。Arch Linux 可安装 `qt6-base qt6-wayland libarchive`；macOS 可使用 `brew install qt`。macOS 打包脚本会将所需的 Qt 库和插件一起打包。
 
+## Windows 打包
+
+需要 64 位 Windows、Rust 的 `x86_64-pc-windows-msvc` 工具链、Visual Studio C++ 构建工具、与 MSVC x64 匹配的 Qt 6（含 `qmake` 和 `windeployqt`）、vcpkg 和 Inno Setup 6。先通过 vcpkg 安装动态链接版本的 libarchive：
+
+```powershell
+vcpkg install libarchive:x64-windows
+```
+
+在 **x64 Native Tools Command Prompt for VS** 或已加载 x64 MSVC 环境的 Developer PowerShell 中运行（按实际路径调整）：
+
+```powershell
+$env:VCPKG_ROOT = 'C:\vcpkg'
+$env:QMAKE = 'C:\Qt\6.8.3\msvc2022_64\bin\qmake.exe'
+powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1
+```
+
+也可以通过 `-VcpkgRoot`、`-Qmake` 和 `-Iscc` 参数指定对应路径。若使用已准备好的 libarchive 预编译包，可用 `-ArchiveRoot` 指定包含 `bin` 和 `lib` 目录的路径；请确保 `bin` 中包含该库的全部非系统运行时 DLL。脚本执行锁定依赖的 release 构建，使用 `windeployqt` 收集 Qt 运行时，并将 libarchive 的运行时 DLL 一同放入安装包。安装程序位于 `target\windows\Sugar-Archive-<版本>-windows-x64-setup.exe`，安装到当前用户目录，提供开始菜单和可选桌面快捷方式。安装包未签名；目标电脑还需可用的 Microsoft Visual C++ 运行时。首次构建可能需要联网下载 Rust 依赖。
+
 ## macOS 打包
 
 在 macOS 上安装 Rust 工具链、Xcode 命令行工具及 Qt（例如 `brew install qt`）后，执行：
