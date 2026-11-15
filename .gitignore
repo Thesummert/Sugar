@@ -1,3 +1,8 @@
 /target
 .DS_Store
 /build-windows.bat
+
+/node_modules
+/dist
+
+/gen

@@ -6,24 +6,23 @@ pkgdesc='Lightweight archive manager for browsing, creating and extracting archi
 arch=('x86_64' 'aarch64')
 url='https://github.com/Thesummert/Sugar'
 license=('GPL-3.0-only')
-depends=('bzip2' 'desktop-file-utils' 'fontconfig' 'gcc-libs' 'glibc' 'libglvnd' 'libx11'
-         'libarchive' 'libxcursor' 'libxi' 'libxkbcommon' 'libxkbcommon-x11' 'libxrandr'
-         'qt6-base' 'qt6-wayland' 'shared-mime-info' 'wayland' 'xdg-desktop-portal' 'xdg-utils' 'xz')
-makedepends=('cargo' 'pkgconf')
-optdepends=('xdg-desktop-portal-gtk: GTK file chooser portal backend'
-            'xdg-desktop-portal-kde: KDE file chooser portal backend')
+depends=('bzip2' 'desktop-file-utils' 'gcc-libs' 'glibc' 'gtk3' 'libarchive' 'webkit2gtk-4.1' 'xdg-desktop-portal' 'xdg-utils' 'xz')
+makedepends=('cargo' 'pkgconf' 'nodejs' 'npm')
+optdepends=('xdg-desktop-portal-gtk: GTK file chooser portal backend' 'xdg-desktop-portal-kde: KDE file chooser portal backend')
 options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
     cd "$srcdir/$pkgname-$pkgver"
+    npm ci --no-audit --no-fund
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
 }
 
 build() {
     cd "$srcdir/$pkgname-$pkgver"
     export CARGO_TARGET_DIR="$srcdir/target"
+    npm run build
     cargo build --release --frozen
 }
 

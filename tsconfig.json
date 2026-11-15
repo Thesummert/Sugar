@@ -1,0 +1,1 @@
+{"compilerOptions":{"allowJs":true,"checkJs":false,"moduleResolution":"bundler","module":"ESNext","target":"ES2022","lib":["ESNext","DOM"],"noEmit":true,"isolatedModules":true,"strict":true,"types":["svelte"]},"include":["frontend/**/*.svelte","frontend/**/*.js"]}

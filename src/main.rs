@@ -1,5 +1,4 @@
 use anyhow::{bail, Context, Result};
-use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker};
 use std::{
     borrow::Cow,
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
@@ -7,18 +6,11 @@ use std::{
     io::{self, Read},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
-    thread,
     time::{Duration, Instant, SystemTime},
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-slint::include_modules!();
-
-mod native_drag;
 mod rar;
-
-#[cfg(target_os = "macos")]
-mod macos;
 
 fn size(bytes: u64) -> String {
     if bytes < 1024 {
@@ -82,83 +74,6 @@ struct ArchiveData {
     staged_sources: Option<Vec<PathBuf>>,
     directories: HashMap<String, Vec<EntryData>>,
     tree: Vec<String>,
-}
-
-// ListView requests only the rows currently visible on screen.
-struct EntryModel {
-    archive: Arc<ArchiveData>,
-    directory: String,
-    notify: ModelNotify,
-}
-impl Model for EntryModel {
-    type Data = ArchiveEntry;
-    fn row_count(&self) -> usize {
-        self.archive
-            .directories
-            .get(&self.directory)
-            .map_or(0, Vec::len)
-    }
-    fn model_tracker(&self) -> &dyn ModelTracker {
-        &self.notify
-    }
-    fn row_data(&self, row: usize) -> Option<ArchiveEntry> {
-        self.archive
-            .directories
-            .get(&self.directory)?
-            .get(row)
-            .map(|entry| ArchiveEntry {
-                name: entry.name.as_str().into(),
-                path: entry.path.as_str().into(),
-                directory: entry.directory,
-                icon: file_icon(&entry.name, entry.directory).into(),
-                kind: if entry.directory {
-                    "文件夹"
-                } else {
-                    "文件"
-                }
-                .into(),
-                size: if entry.directory {
-                    "—".into()
-                } else {
-                    size(entry.size).into()
-                },
-                compressed: if entry.directory {
-                    "—".into()
-                } else {
-                    entry
-                        .compressed
-                        .map(size)
-                        .unwrap_or_else(|| "—".into())
-                        .into()
-                },
-            })
-    }
-}
-
-struct TreeModel {
-    archive: Arc<ArchiveData>,
-    notify: ModelNotify,
-}
-impl Model for TreeModel {
-    type Data = TreeEntry;
-    fn row_count(&self) -> usize {
-        self.archive.tree.len()
-    }
-    fn model_tracker(&self) -> &dyn ModelTracker {
-        &self.notify
-    }
-    fn row_data(&self, row: usize) -> Option<TreeEntry> {
-        self.archive.tree.get(row).map(|path| TreeEntry {
-            path: path.as_str().into(),
-            name: path
-                .trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .unwrap_or("")
-                .into(),
-            depth: path.matches('/').count().saturating_sub(1) as i32,
-        })
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -385,93 +300,6 @@ fn build_archive_data(
         staged_sources,
         directories,
         tree: tree.into_iter().collect(),
-    }
-}
-
-fn show_directory(ui: &AppWindow, archive: Arc<ArchiveData>, directory: &str) {
-    if !archive.directories.contains_key(directory) {
-        return;
-    }
-    ui.set_selected_entry("".into());
-    ui.set_current_directory(directory.into());
-    ui.set_entries(ModelRc::new(EntryModel {
-        archive,
-        directory: directory.to_owned(),
-        notify: ModelNotify::default(),
-    }));
-}
-
-fn show_archive(ui: &AppWindow, archive: Arc<ArchiveData>, preserve_directory: bool) {
-    let staging = archive.staged_sources.is_some();
-    ui.set_staging(staging);
-    ui.set_archive_name(if staging {
-        "待压缩文件".into()
-    } else {
-        archive
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-            .into()
-    });
-    let directory = if preserve_directory {
-        ui.get_current_directory().to_string()
-    } else {
-        String::new()
-    };
-    ui.set_tree(ModelRc::new(TreeModel {
-        archive: archive.clone(),
-        notify: ModelNotify::default(),
-    }));
-    ui.set_has_archive(true);
-    ui.set_can_add(!staging && archive.format == ArchiveFormat::Zip);
-    if archive.directories.contains_key(&directory) {
-        show_directory(ui, archive, &directory);
-    } else {
-        show_directory(ui, archive, "");
-    }
-}
-
-fn run_job(
-    ui: &AppWindow,
-    current: Arc<Mutex<Option<Arc<ArchiveData>>>>,
-    progress: &'static str,
-    success: &'static str,
-    job: impl FnOnce() -> Result<Option<ArchiveData>> + Send + 'static,
-) {
-    ui.set_busy(true);
-    ui.set_status(progress.into());
-    let weak = ui.as_weak();
-    thread::spawn(move || {
-        let result = job();
-        let _ = weak.upgrade_in_event_loop(move |ui| {
-            ui.set_busy(false);
-            let result = result.map(|data| {
-                if let Some(data) = data {
-                    let mut current = current.lock().unwrap();
-                    let preserve = current.as_ref().is_some_and(|old| old.path == data.path);
-                    let archive = Arc::new(data);
-                    *current = Some(archive.clone());
-                    show_archive(&ui, archive, preserve);
-                }
-            });
-            report(&ui, result, success);
-        });
-    });
-}
-
-fn report(ui: &AppWindow, result: Result<()>, success: &str) {
-    match result {
-        Ok(()) => ui.set_status(success.into()),
-        Err(error) => {
-            ui.set_status("操作失败".into());
-            rfd::MessageDialog::new()
-                .set_title("操作失败")
-                .set_description(format!("{error:#}"))
-                .set_level(rfd::MessageLevel::Error)
-                .show();
-        }
     }
 }
 
@@ -1163,20 +991,6 @@ fn archive_folder_name(path: &Path) -> String {
     }
 }
 
-fn prepare_extract_dialog(ui: &AppWindow, path: &Path, item: &str) {
-    ui.set_extract_item_path(item.into());
-    ui.set_extract_destination(
-        path.parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_string_lossy()
-            .to_string()
-            .into(),
-    );
-    ui.set_extra_folder_name(archive_folder_name(path).into());
-    ui.set_create_extra_folder(false);
-    ui.set_extract_dialog_open(true);
-}
-
 fn prepare_destination(destination: &Path, extra: Option<&str>) -> Result<PathBuf> {
     if !destination.is_dir() {
         bail!("解压位置不是已有文件夹：{}", destination.display());
@@ -1234,46 +1048,6 @@ impl PreparedDrag {
     }
 }
 
-fn start_prepared_drag(ui: &AppWindow, path: PathBuf, generation: i32) {
-    ui.set_busy(true);
-    let weak = ui.as_weak();
-    // QDrag runs a nested platform event loop. Queue outside both pointer and
-    // Slint timer callbacks, since nested timer activation is not supported.
-    let _ = weak.upgrade_in_event_loop(move |ui| {
-        if ui.get_drag_generation() != generation {
-            ui.set_busy(false);
-            ui.set_status("准备完成，再次拖动所选项目即可解压到目标文件夹".into());
-            return;
-        }
-        ui.set_status("拖到目标文件夹后松开鼠标（Esc 取消）".into());
-        let result = native_drag::start(&path);
-        if result != native_drag::DragResult::Released {
-            // A native drag consumes the release; clear Slint's row pointer grab
-            // without turning the drag into a click or a double-click.
-            ui.window()
-                .dispatch_event(slint::platform::WindowEvent::PointerReleased {
-                    position: slint::LogicalPosition::new(-1.0, -1.0),
-                    button: slint::platform::PointerEventButton::Left,
-                });
-            ui.window()
-                .dispatch_event(slint::platform::WindowEvent::PointerExited);
-        }
-        ui.set_busy(false);
-        ui.set_status(
-            match result {
-                native_drag::DragResult::Copied => "已交给文件管理器复制到目标文件夹",
-                native_drag::DragResult::Cancelled => "已取消拖出解压",
-                native_drag::DragResult::Released => {
-                    "准备完成，再次拖动所选项目即可解压到目标文件夹"
-                }
-            }
-            .into(),
-        );
-    });
-}
-
-// The installed helper has a distinct name so older Sugar releases are never
-// accidentally launched as a GUI while Pudding checks for CLI support.
 fn pudding_cli(args: &[std::ffi::OsString]) -> Result<()> {
     let action = args.first().and_then(|s| s.to_str()).context("缺少操作")?;
     match action {
@@ -1287,14 +1061,18 @@ fn pudding_cli(args: &[std::ffi::OsString]) -> Result<()> {
             extract_selection_with_progress(archive, destination, None, &mut |_, _| {})?;
         }
         "stage" if args.len() >= 2 => {
-            std::process::Command::new(std::env::current_exe()?)
-                .arg("--pudding-stage")
-                .args(&args[1..])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .context("无法启动 Sugar")?;
+            std::process::Command::new(std::env::current_exe()?.with_file_name(if cfg!(windows) {
+                "sugar-archive.exe"
+            } else {
+                "sugar-archive"
+            }))
+            .arg("--pudding-stage")
+            .args(&args[1..])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("无法启动 Sugar")?;
         }
         "compress" if args.len() >= 3 => {
             let destination = Path::new(&args[1]);
@@ -1306,6 +1084,8 @@ fn pudding_cli(args: &[std::ffi::OsString]) -> Result<()> {
     Ok(())
 }
 
+mod app;
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().collect();
     if args
@@ -1316,556 +1096,7 @@ fn main() -> Result<()> {
     {
         return pudding_cli(&args[1..]);
     }
-    slint::BackendSelector::new()
-        .backend_name("qt".into())
-        .select()?;
-    let ui = AppWindow::new()?;
-    let current = Arc::new(Mutex::new(None::<Arc<ArchiveData>>));
-    let temporary_files = Arc::new(Mutex::new(Vec::<tempfile::TempDir>::new()));
-    let prepared_drag = Arc::new(Mutex::new(None::<PreparedDrag>));
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_can_drop_files(|data| data.has_file_paths());
-        ui.on_drop_files(move |data| {
-            let Some(ui) = weak.upgrade() else { return };
-            if ui.get_busy()
-                || ui.get_extract_dialog_open()
-                || ui.get_appearance_dialog_open()
-                || ui.get_compression_dialog_open()
-            {
-                return;
-            }
-            let Ok(paths) = data.file_paths() else { return };
-            let mut staged = current
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|archive| archive.staged_sources.clone())
-                .unwrap_or_default();
-            staged.extend(paths.map(Path::to_path_buf));
-            run_job(
-                &ui,
-                current.clone(),
-                "正在读取拖入的文件…",
-                "文件已加入待压缩列表",
-                move || stage_archive_inputs(staged).map(Some),
-            );
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        let temporary_files = temporary_files.clone();
-        ui.on_drag_item(move |item, generation| {
-            let ui = weak.unwrap();
-            if ui.get_busy()
-                || ui.get_staging()
-                || ui.get_extract_dialog_open()
-                || ui.get_appearance_dialog_open()
-                || ui.get_compression_dialog_open()
-            {
-                return;
-            }
-            let Some(archive) = current.lock().unwrap().clone() else {
-                return;
-            };
-            let item = item.to_string();
-            if !archive
-                .directories
-                .get(ui.get_current_directory().as_str())
-                .is_some_and(|entries| entries.iter().any(|entry| entry.path == item))
-            {
-                return;
-            }
-            let version = match ArchiveVersion::read(&archive.path) {
-                Ok(version) => version,
-                Err(error) => {
-                    report(&ui, Err(error), "");
-                    return;
-                }
-            };
-            let cached = prepared_drag
-                .lock()
-                .unwrap()
-                .as_ref()
-                .filter(|prepared| prepared.matches(&archive, &item, &version))
-                .map(|prepared| prepared.path.clone());
-            if let Some(path) = cached {
-                start_prepared_drag(&ui, path, generation);
-                return;
-            }
-            ui.set_busy(true);
-            ui.set_status("正在准备拖出内容，请按住鼠标…".into());
-            let weak = ui.as_weak();
-            let temporary_files = temporary_files.clone();
-            let prepared_drag = prepared_drag.clone();
-            thread::spawn(move || {
-                let progress_ui = weak.clone();
-                let mut last_update = Instant::now();
-                let result = (|| {
-                    let (directory, path) =
-                        extract_temporary_selection(&archive.path, &item, &mut |done, total| {
-                            if last_update.elapsed() < Duration::from_millis(150) {
-                                return;
-                            }
-                            last_update = Instant::now();
-                            let label = format!(
-                                "正在准备拖出内容：{} / {}，请按住鼠标…",
-                                size(done),
-                                size(total)
-                            );
-                            let _ = progress_ui
-                                .upgrade_in_event_loop(move |ui| ui.set_status(label.into()));
-                        })?;
-                    if ArchiveVersion::read(&archive.path)? != version {
-                        bail!("压缩包在解压过程中发生变化，请重新拖动");
-                    }
-                    // File managers can finish copying after QDrag returns. Keep
-                    // the source alive until exit, just like externally opened files.
-                    temporary_files.lock().unwrap().push(directory);
-                    *prepared_drag.lock().unwrap() = Some(PreparedDrag {
-                        archive,
-                        item,
-                        version,
-                        path: path.clone(),
-                    });
-                    Ok(path)
-                })();
-                let _ = weak.upgrade_in_event_loop(move |ui| match result {
-                    Ok(path) => start_prepared_drag(&ui, path, generation),
-                    Err(error) => {
-                        ui.set_busy(false);
-                        report(&ui, Err(error), "");
-                    }
-                });
-            });
-        });
-    }
-    #[cfg(target_os = "macos")]
-    let (_app_delegate, _open_timer) = {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        macos::receive_open_files(move |path| {
-            if let Some(ui) = weak.upgrade() {
-                if ui.get_busy()
-                    || ui.get_extract_dialog_open()
-                    || ui.get_appearance_dialog_open()
-                    || ui.get_compression_dialog_open()
-                {
-                    return false;
-                }
-                run_job(
-                    &ui,
-                    current.clone(),
-                    "正在打开压缩包…",
-                    "压缩包已打开",
-                    move || read_archive(&path).map(Some),
-                );
-                true
-            } else {
-                true
-            }
-        })
-    };
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_compress_files(move || {
-            let ui = weak.unwrap();
-            if ui.get_busy() {
-                return;
-            }
-            let Some(files) = current
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|archive| archive.staged_sources.clone())
-            else {
-                return;
-            };
-            let name = if files.len() == 1 {
-                format!(
-                    "{}",
-                    files[0].file_name().unwrap_or_default().to_string_lossy()
-                )
-            } else {
-                "新建压缩包".to_owned()
-            };
-            let destination = files[0].parent().unwrap_or_else(|| Path::new("."));
-            ui.set_compression_name(name.into());
-            ui.set_compression_destination(destination.to_string_lossy().to_string().into());
-            ui.set_compression_level(6);
-            ui.set_compression_format("zip".into());
-            ui.set_compression_dialog_open(true);
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        ui.on_choose_compression_destination(move || {
-            let ui = weak.unwrap();
-            let mut dialog = rfd::FileDialog::new();
-            let destination = ui.get_compression_destination().to_string();
-            if Path::new(&destination).is_dir() {
-                dialog = dialog.set_directory(destination);
-            }
-            if let Some(path) = dialog.pick_folder() {
-                ui.set_compression_destination(path.to_string_lossy().to_string().into());
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_confirm_compression(move || {
-            let ui = weak.unwrap();
-            if ui.get_busy() || !ui.get_compression_dialog_open() {
-                return;
-            }
-            let Some(files) = current
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|archive| archive.staged_sources.clone())
-            else {
-                return;
-            };
-            let destination = ui.get_compression_destination().to_string();
-            let name = ui.get_compression_name().to_string();
-            let path = match compression_target(
-                Path::new(&destination),
-                &name,
-                ui.get_compression_format().as_str(),
-            ) {
-                Ok(path) => path,
-                Err(error) => {
-                    report(&ui, Err(error), "");
-                    return;
-                }
-            };
-            let level = ui.get_compression_level();
-            ui.set_compression_dialog_open(false);
-            run_job(
-                &ui,
-                current.clone(),
-                "正在创建压缩包…",
-                "压缩包已创建",
-                move || {
-                    create_archive_from_files(&path, &files, level)?;
-                    read_archive(&path).map(Some)
-                },
-            );
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_navigate(move |directory| {
-            if let Some(archive) = current.lock().unwrap().clone() {
-                show_directory(&weak.unwrap(), archive, directory.as_str());
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_navigate_parent(move || {
-            let ui = weak.unwrap();
-            let directory = ui.get_current_directory().to_string();
-            let parent = directory
-                .trim_end_matches('/')
-                .rsplit_once('/')
-                .map_or("", |(parent, _)| parent);
-            let parent = if parent.is_empty() {
-                String::new()
-            } else {
-                format!("{parent}/")
-            };
-            if let Some(archive) = current.lock().unwrap().clone() {
-                show_directory(&ui, archive, &parent);
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_open_archive(move || {
-            let ui = weak.unwrap();
-            if ui.get_busy() {
-                return;
-            }
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter(
-                    "支持的压缩包",
-                    &[
-                        "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz",
-                    ],
-                )
-                .pick_file()
-            else {
-                return;
-            };
-            run_job(
-                &ui,
-                current.clone(),
-                "正在打开压缩包…",
-                "压缩包已打开",
-                move || read_archive(&path).map(Some),
-            );
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_create_archive(move || {
-            let ui = weak.unwrap();
-            if ui.get_busy() {
-                return;
-            }
-            let Some(mut path) = rfd::FileDialog::new()
-                .add_filter("ZIP 压缩包", &["zip"])
-                .set_file_name("新建压缩包.zip")
-                .save_file()
-            else {
-                return;
-            };
-            if path.extension().is_none() {
-                path.set_extension("zip");
-            }
-            run_job(
-                &ui,
-                current.clone(),
-                "正在创建压缩包…",
-                "压缩包已创建",
-                move || {
-                    create_archive(&path)?;
-                    read_archive(&path).map(Some)
-                },
-            );
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_add_files(move || {
-            let ui = weak.unwrap();
-            if ui.get_busy() {
-                return;
-            }
-            let Some(archive) = current.lock().unwrap().clone() else {
-                return;
-            };
-            if archive.format != ArchiveFormat::Zip {
-                return;
-            }
-            let path = archive.path.clone();
-            let directory = ui.get_current_directory().to_string();
-            let Some(files) = rfd::FileDialog::new().pick_files() else {
-                return;
-            };
-            run_job(
-                &ui,
-                current.clone(),
-                "正在添加文件…",
-                "文件已添加",
-                move || {
-                    add_files(&path, &directory, &files)?;
-                    read_archive(&path).map(Some)
-                },
-            );
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_extract_archive(move || {
-            let ui = weak.unwrap();
-            if ui.get_busy() {
-                return;
-            }
-            if let Some(archive) = current.lock().unwrap().clone() {
-                prepare_extract_dialog(&ui, &archive.path, "");
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        let temporary_files = temporary_files.clone();
-        ui.on_open_item(move |item| {
-            let ui = weak.unwrap();
-            if ui.get_busy() {
-                return;
-            }
-            let Some(archive) = current.lock().unwrap().clone() else {
-                return;
-            };
-            let item = item.to_string();
-            let directory = ui.get_current_directory().to_string();
-            if !archive.directories.get(&directory).is_some_and(|entries| {
-                entries
-                    .iter()
-                    .any(|entry| entry.path == item && !entry.directory)
-            }) {
-                return;
-            }
-            let path = archive.path.clone();
-            let temporary_files = temporary_files.clone();
-            ui.set_busy(true);
-            ui.set_status("正在打开文件…".into());
-            let weak = ui.as_weak();
-            thread::spawn(move || {
-                let result = (|| {
-                    let (directory, file) = extract_temporary_file(&path, &item)?;
-                    open_with_default_app(&file)?;
-                    temporary_files.lock().unwrap().push(directory);
-                    Ok(())
-                })();
-                let _ = weak.upgrade_in_event_loop(move |ui| {
-                    ui.set_busy(false);
-                    report(&ui, result, "文件已打开");
-                });
-            });
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_extract_item(move |item| {
-            let ui = weak.unwrap();
-            if item.is_empty() || item != ui.get_selected_entry() || ui.get_busy() {
-                return;
-            }
-            if let Some(archive) = current.lock().unwrap().clone() {
-                prepare_extract_dialog(&ui, &archive.path, item.as_str());
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        ui.on_choose_destination(move || {
-            let ui = weak.unwrap();
-            let mut dialog = rfd::FileDialog::new();
-            let previous = ui.get_extract_destination().to_string();
-            if Path::new(&previous).is_dir() {
-                dialog = dialog.set_directory(previous);
-            }
-            if let Some(path) = dialog.pick_folder() {
-                ui.set_extract_destination(path.to_string_lossy().to_string().into());
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let current = current.clone();
-        ui.on_confirm_extract(move || {
-            let ui = weak.unwrap();
-            if ui.get_busy() || !ui.get_extract_dialog_open() {
-                return;
-            }
-            let Some(archive) = current.lock().unwrap().clone() else {
-                return;
-            };
-            let destination = PathBuf::from(ui.get_extract_destination().as_str());
-            if destination.as_os_str().is_empty() {
-                return;
-            }
-            let item = ui.get_extract_item_path().to_string();
-            let extra = ui.get_create_extra_folder();
-            let folder = ui.get_extra_folder_name().to_string();
-            let path = archive.path.clone();
-            ui.set_extract_dialog_open(false);
-            ui.set_busy(true);
-            ui.set_status("正在解压文件…".into());
-            ui.set_extract_progress(0.0);
-            ui.set_extract_progress_text("正在检查压缩包…".into());
-            ui.set_extract_remaining("预计剩余时间：计算中…".into());
-            ui.set_progress_dialog_open(true);
-            let weak = ui.as_weak();
-            thread::spawn(move || {
-                let result = (|| {
-                    let destination =
-                        prepare_destination(&destination, extra.then_some(folder.as_str()))?;
-                    let started = Instant::now();
-                    let mut last_update = None::<Instant>;
-                    let progress_ui = weak.clone();
-                    extract_selection_with_progress(
-                        &path,
-                        &destination,
-                        (!item.is_empty()).then_some(item.as_str()),
-                        &mut |completed, total| {
-                            let now = Instant::now();
-                            if last_update.is_some_and(|last| {
-                                now.duration_since(last) < Duration::from_millis(150)
-                            }) {
-                                return;
-                            }
-                            last_update = Some(now);
-                            let fraction = if total == 0 {
-                                0.0
-                            } else {
-                                (completed as f64 / total as f64).min(0.99) as f32
-                            };
-                            let label = if total == 0 {
-                                "正在处理空文件和文件夹…".to_owned()
-                            } else {
-                                format!(
-                                    "{} / {}（{}%）",
-                                    size(completed.min(total)),
-                                    size(total),
-                                    (fraction * 100.0) as u32
-                                )
-                            };
-                            let remaining = remaining_time(completed, total, started.elapsed());
-                            let _ = progress_ui.upgrade_in_event_loop(move |ui| {
-                                ui.set_extract_progress(fraction);
-                                ui.set_extract_progress_text(label.into());
-                                ui.set_extract_remaining(remaining.into());
-                            });
-                        },
-                    )
-                })();
-                let _ = weak.upgrade_in_event_loop(move |ui| {
-                    ui.set_progress_dialog_open(false);
-                    ui.set_busy(false);
-                    report(&ui, result, "解压完成");
-                });
-            });
-        });
-    }
-    // Pudding can stage several sources before opening the compression dialog.
-    if args.get(1).is_some_and(|arg| arg == "--pudding-stage") {
-        let sources: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
-        ui.set_busy(true);
-        ui.set_status("正在读取待压缩文件…".into());
-        let weak = ui.as_weak();
-        thread::spawn(move || {
-            let result = stage_archive_inputs(sources);
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                ui.set_busy(false);
-                match result {
-                    Ok(data) => {
-                        let archive = Arc::new(data);
-                        *current.lock().unwrap() = Some(archive.clone());
-                        show_archive(&ui, archive, false);
-                        ui.invoke_compress_files();
-                    }
-                    Err(error) => report(&ui, Err(error), ""),
-                }
-            });
-        });
-    } else if let Some(path) = args.get(1).map(PathBuf::from) {
-        // Desktop launchers pass a local archive path through their %f field code.
-        run_job(
-            &ui,
-            current,
-            "正在打开压缩包…",
-            "压缩包已打开",
-            move || read_archive(&path).map(Some),
-        );
-    }
-    ui.run()?;
-    Ok(())
+    app::run()
 }
 
 #[cfg(test)]
@@ -2004,116 +1235,6 @@ mod tests {
         pudding_cli(&args("extract", &[&archive, &out]))?;
         assert_eq!(fs::read(out.join("hello.txt"))?, b"hello");
         assert!(pudding_cli(&args("extract", &[&archive, &out])).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn drag_gesture_starts_once_and_does_not_open_or_drag_staged_files() -> Result<()> {
-        use slint::platform::{PointerEventButton, WindowEvent};
-        use std::{cell::RefCell, rc::Rc};
-
-        i_slint_backend_testing::init_no_event_loop();
-        let ui = AppWindow::new()?;
-        ui.set_has_archive(true);
-        ui.set_entries(ModelRc::new(slint::VecModel::from(
-            (0..80)
-                .map(|i| ArchiveEntry {
-                    name: format!("{i}.txt").into(),
-                    path: format!("folder/{i}.txt").into(),
-                    ..Default::default()
-                })
-                .collect::<Vec<_>>(),
-        )));
-        let requests = Rc::new(RefCell::new(Vec::new()));
-        let received = requests.clone();
-        ui.on_drag_item(move |item, generation| received.borrow_mut().push((item, generation)));
-        let opened = Rc::new(RefCell::new(0));
-        let received = opened.clone();
-        ui.on_open_item(move |_| *received.borrow_mut() += 1);
-        ui.show()?;
-        ui.window().set_size(slint::LogicalSize::new(1080.0, 700.0));
-
-        // Find a visible row without depending on native menu/font dimensions.
-        let mut row = None;
-        for y in (150..350).step_by(10) {
-            let position = slint::LogicalPosition::new(350.0, y as f32);
-            let generation = ui.get_drag_generation();
-            ui.window().dispatch_event(WindowEvent::PointerPressed {
-                position,
-                button: PointerEventButton::Left,
-            });
-            let hit = ui.get_drag_generation() != generation;
-            ui.window().dispatch_event(WindowEvent::PointerReleased {
-                position,
-                button: PointerEventButton::Left,
-            });
-            if hit {
-                row = Some(position);
-                break;
-            }
-        }
-        let row = row.context("未找到可拖动的文件行")?;
-        assert!(
-            requests.borrow().is_empty(),
-            "a click must not prepare extraction"
-        );
-        *opened.borrow_mut() = 0;
-        for offset in [(24.0, 0.0), (0.0, 24.0)] {
-            ui.window().dispatch_event(WindowEvent::PointerPressed {
-                position: row,
-                button: PointerEventButton::Left,
-            });
-            let before = requests.borrow().len();
-            ui.window().dispatch_event(WindowEvent::PointerMoved {
-                position: slint::LogicalPosition::new(row.x + 2.0, row.y + 2.0),
-            });
-            assert_eq!(requests.borrow().len(), before);
-            for multiplier in [1.0, 2.0] {
-                ui.window().dispatch_event(WindowEvent::PointerMoved {
-                    position: slint::LogicalPosition::new(
-                        row.x + offset.0 * multiplier,
-                        row.y + offset.1 * multiplier,
-                    ),
-                });
-            }
-            assert_eq!(requests.borrow().len(), before + 1);
-            let generation = requests.borrow().last().unwrap().1;
-            ui.window().dispatch_event(WindowEvent::PointerReleased {
-                position: row,
-                button: PointerEventButton::Left,
-            });
-            assert_ne!(
-                ui.get_drag_generation(),
-                generation,
-                "release invalidates pending drag"
-            );
-        }
-        assert_eq!(
-            *opened.borrow(),
-            0,
-            "dragging must not trigger double-click open"
-        );
-        for (staging, busy, button) in [
-            (true, false, PointerEventButton::Left),
-            (false, true, PointerEventButton::Left),
-            (false, false, PointerEventButton::Right),
-        ] {
-            ui.set_staging(staging);
-            ui.set_busy(busy);
-            let before = requests.borrow().len();
-            ui.window().dispatch_event(WindowEvent::PointerPressed {
-                position: row,
-                button,
-            });
-            ui.window().dispatch_event(WindowEvent::PointerMoved {
-                position: slint::LogicalPosition::new(row.x + 30.0, row.y),
-            });
-            ui.window().dispatch_event(WindowEvent::PointerReleased {
-                position: row,
-                button,
-            });
-            assert_eq!(requests.borrow().len(), before);
-        }
         Ok(())
     }
 
@@ -2596,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn read_many_entries_and_access_virtualized_rows() -> Result<()> {
+    fn read_many_entries() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("many.zip");
         let mut writer = ZipWriter::new(File::create(&path)?);
@@ -2605,17 +1726,9 @@ mod tests {
         }
         writer.finish()?;
         let data = read_archive(&path)?;
-        let model = EntryModel {
-            archive: Arc::new(data),
-            directory: String::new(),
-            notify: ModelNotify::default(),
-        };
-        assert_eq!(model.row_count(), 10_000);
-        assert_eq!(
-            model.row_data(9_999).unwrap().name.as_str(),
-            "file-9999.txt"
-        );
-        assert!(model.row_data(10_000).is_none());
+        let entries = &data.directories[""];
+        assert_eq!(entries.len(), 10_000);
+        assert_eq!(entries[9_999].name, "file-9999.txt");
         Ok(())
     }
 
