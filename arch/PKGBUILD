@@ -23,7 +23,7 @@ build() {
     cd "$srcdir/$pkgname-$pkgver"
     export CARGO_TARGET_DIR="$srcdir/target"
     npm run build
-    cargo build --release --frozen
+    cargo build --release --frozen --features custom-protocol
 }
 
 check() {

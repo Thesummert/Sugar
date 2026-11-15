@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 build = "build.rs"
 
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+pudding-cli = []
+
 [dependencies]
 anyhow = "1"
 bzip2 = "0.5"

@@ -23,11 +23,11 @@ npm ci
 npm run tauri dev
 ```
 
-生产构建使用 `npm run build` 后执行 `cargo build --release --locked`。也可通过 `npm run tauri build` 使用 Tauri 打包器；需要确保 libarchive 能在目标系统加载。前端检查使用 `npm run check`，Rust 测试使用 `cargo test --locked`。
+生产构建使用 `npm run build` 后执行 `cargo build --release --locked --features custom-protocol`，以将前端资源嵌入程序。也可通过 `npm run tauri build` 使用 Tauri 打包器；需要确保 libarchive 能在目标系统加载。前端检查使用 `npm run check`，Rust 测试使用 `cargo test --locked`。
 
 ## 平台打包
 
-- Windows：在 x64 Visual Studio 开发环境中，准备动态链接的 libarchive 和 Inno Setup 6，运行 `powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -ArchiveRoot <libarchive目录> -Iscc <ISCC.exe路径>`。脚本生成安装程序并包含 libarchive DLL 和 Pudding 命令。目标机器需要 WebView2 Runtime。
+- Windows：安装 Rust MSVC 工具链、Node.js、Visual Studio C++ x64 构建工具、动态链接的 libarchive 和 Inno Setup 6，双击 `build-windows.bat` 即可构建。脚本自动查找 Visual Studio，并按 `LIBARCHIVE_ROOT`、`VCPKG_ROOT`、项目的 `target/windows-tools/libarchive-static` 顺序查找 libarchive；Inno Setup 可安装到默认位置，也可放在 `target/windows-tools/inno`。首次运行可能需要联网下载依赖。生成的安装程序位于 `target/windows/`，包含 libarchive DLL 和 Pudding 命令；目标机器需要 WebView2 Runtime。也可以使用 `scripts/package-windows.ps1` 的 `-ArchiveRoot` 和 `-Iscc` 参数指定路径，或在自动化中使用 `build-windows.bat --no-pause`。
 - macOS：运行 `sh scripts/package-macos.sh`，生成 `target/macos/Sugar Archive.app`。应用采用本地临时签名；分发需要开发者签名和公证。
 - Arch Linux：安装 `base-devel rust nodejs npm desktop-file-utils` 后运行 `sh scripts/package-arch.sh --syncdeps`。应用通过桌面文件声明支持的 MIME 类型，文件选择需要适合当前桌面的 XDG Desktop Portal 后端。
 

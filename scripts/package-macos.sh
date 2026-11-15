@@ -5,7 +5,7 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
 npm ci --no-audit --no-fund
 npm run build
-cargo build --release --locked
+cargo build --release --locked --features custom-protocol
 app="$project_dir/target/macos/Sugar Archive.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/sugar-archive "$app/Contents/MacOS/sugar-archive"

@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(feature = "pudding-cli")),
+    windows_subsystem = "windows"
+)]
+
 use anyhow::{bail, Context, Result};
 use std::{
     borrow::Cow,
