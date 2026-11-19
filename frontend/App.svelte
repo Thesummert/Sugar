@@ -7,6 +7,7 @@
   let archive = $state(null), selected = $state(''), status = $state('准备就绪'), busy = $state(false), dark = $state(false), modal = $state('');
   let destination = $state(''), folder = $state(''), extra = $state(false), item = $state('');
   let format = $state('zip'), name = $state(''), level = $state(6), progress = $state({fraction:0,text:'正在检查压缩包…',remaining:'预计剩余时间：计算中…'});
+  let separate = $state(false);
   let pointer = null, openPending = $state(false);
   let scrollTop = $state(0), listHeight = $state(500), rowsElement = $state();
   let start = $derived(Math.max(0, Math.floor(scrollTop / 48) - 8));
@@ -21,10 +22,21 @@
   async function newArchive() {apply(await task('正在创建压缩包…',()=>invoke('create_empty'),'压缩包已创建'));}
   async function navigate(directory) {if(!archive||busy)return; apply(await task('正在读取目录…',()=>invoke('navigate',{directory})));}
   async function add() {apply(await task('正在添加文件…',()=>invoke('add',{directory:archive.directory}),'文件已添加'));}
-  function compressDialog() { format='zip';level=6;name=archive.folder||'新建压缩包';destination=archive.parent;modal='compress'; }
+  function compressDialog() {
+    format = 'zip';
+    level = 6;
+    name = archive.folder || '新建压缩包';
+    destination = archive.parent;
+    separate = false;
+    modal = 'compress';
+  }
   function extractDialog(path='') {item=path;destination=archive.parent;folder=archive.folder;extra=false;modal='extract';}
   async function chooseFolder() {const p=await invoke('choose_folder');if(p)destination=p;}
-  async function compress() {modal='';apply(await task('正在创建压缩包…',()=>invoke('compress',{destination,name,format,level}),'压缩包已创建'));}
+  async function compress() {
+    modal = '';
+    const success = separate ? `已创建 ${archive.separate_count} 个压缩包` : '压缩包已创建';
+    apply(await task('正在创建压缩包…', () => invoke('compress', { destination, name, format, level, separate }), success));
+  }
   async function extract() {modal='progress';progress={fraction:0,text:'正在检查压缩包…',remaining:'预计剩余时间：计算中…'}; await task('正在解压文件…',()=>invoke('extract',{destination,item,extra:extra?folder:null}),'解压完成');modal='';}
   async function activate(row) {if(row.directory) await navigate(row.path); else if(!archive.staging) await task('正在打开文件…',()=>invoke('open_item',{item:row.path}),'文件已打开');}
   function down(e,row) { if(e.button!==0 || busy || archive.staging)return; pointer={x:e.clientX,y:e.clientY,row,active:true,started:false};selected=row.path; }
@@ -48,7 +60,26 @@
   </div>
   {#if modal}<div class="overlay"><div class="dialog" role="dialog" aria-modal="true">
     {#if modal==='appearance'}<h2>设置</h2><b>外观</b><p>选择应用的颜色模式</p><div class="choice"><button class:primary={!dark} onclick={()=>dark=false}> {dark?'':'✓ '}亮色</button><button class:primary={dark} onclick={()=>dark=true}>{dark?'✓ ':''}暗色</button></div><div class="actions"><button onclick={()=>modal=''}>关闭</button></div>
-    {:else if modal==='compress'}<h2>压缩选项</h2><b>压缩格式</b><div class="choice">{#each ['zip','7z','tar','tar.gz','tar.bz2','tar.xz'] as f}<button class:primary={format===f} onclick={()=>{format=f;if(level===0&&!['zip','7z'].includes(f))level=6}}>{f}</button>{/each}</div><label for="name">压缩包名称</label><input id="name" bind:value={name}><label for="destination">保存位置</label><div class="input-row"><input id="destination" bind:value={destination}><button onclick={chooseFolder}>浏览…</button></div><b>压缩程度</b><div class="choice">{#each [[0,'仅存储'],[1,'快速'],[6,'标准'],[9,'较小']] as option}<button disabled={option[0]===0&&!['zip','7z'].includes(format)} class:primary={level===option[0]} onclick={()=>level=option[0]}>{option[1]}</button>{/each}</div><p>{format==='tar'?'TAR 不压缩数据':'较高压缩程度可能需要更长时间'}</p><div class="actions"><button onclick={()=>modal=''}>取消</button><button class="primary" disabled={!name||!destination} onclick={compress}>开始压缩</button></div>
+    {:else if modal==='compress'}
+      <h2>压缩选项</h2>
+      <b>压缩格式</b>
+      <div class="choice">{#each ['zip','7z','tar','tar.gz','tar.bz2','tar.xz'] as f}<button class:primary={format===f} onclick={()=>{format=f;if(level===0&&!['zip','7z'].includes(f))level=6}}>{f}</button>{/each}</div>
+      {#if archive.separate_count > 1}
+        <label class="checkbox"><input type="checkbox" bind:checked={separate}>将每个文件夹分别压缩成同名压缩包</label>
+      {/if}
+      {#if !separate}
+        <label for="name">压缩包名称</label>
+        <input id="name" bind:value={name}>
+      {/if}
+      <label for="destination">保存位置</label>
+      <div class="input-row"><input id="destination" bind:value={destination}><button onclick={chooseFolder}>浏览…</button></div>
+      <b>压缩程度</b>
+      <div class="choice">{#each [[0,'仅存储'],[1,'快速'],[6,'标准'],[9,'较小']] as option}<button disabled={option[0]===0&&!['zip','7z'].includes(format)} class:primary={level===option[0]} onclick={()=>level=option[0]}>{option[1]}</button>{/each}</div>
+      <p>{format==='tar'?'TAR 不压缩数据':'较高压缩程度可能需要更长时间'}</p>
+      <div class="actions">
+        <button onclick={() => modal = ''}>取消</button>
+        <button class="primary" disabled={(!separate && !name) || !destination} onclick={compress}>开始压缩</button>
+      </div>
     {:else if modal==='extract'}<h2>解压到</h2><p>{item?'解压所选：'+item:'解压整个压缩包'}</p><label for="extract-dest">目标文件夹</label><div class="input-row"><input id="extract-dest" bind:value={destination}><button onclick={chooseFolder}>浏览…</button></div><label class="checkbox"><input type="checkbox" bind:checked={extra}>创建额外文件夹</label><div class="input-row"><label for="folder">文件夹名称</label><input id="folder" disabled={!extra} bind:value={folder}></div><div class="actions"><button onclick={()=>modal=''}>取消</button><button class="primary" disabled={!destination||(extra&&!folder)} onclick={extract}>开始解压</button></div>
     {:else}<h2>正在解压</h2><p>{progress.text}</p><div class="progress"><div style:width={`${progress.fraction*100}%`}></div></div><p>{progress.remaining}</p>{/if}
   </div></div>{/if}

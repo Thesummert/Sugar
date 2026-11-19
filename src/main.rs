@@ -411,6 +411,15 @@ fn stage_archive_inputs(files: Vec<PathBuf>) -> Result<ArchiveData> {
 }
 
 fn create_archive_from_files(path: &Path, files: &[PathBuf], level: i32) -> Result<()> {
+    let temp = write_archive(path, collect_archive_inputs(files)?, level)?;
+    persist_archive(temp, path)
+}
+
+fn write_archive(
+    path: &Path,
+    entries: Vec<SourceEntry>,
+    level: i32,
+) -> Result<tempfile::NamedTempFile> {
     if ![0, 1, 6, 9].contains(&level) {
         bail!("无效的压缩程度");
     }
@@ -418,7 +427,6 @@ fn create_archive_from_files(path: &Path, files: &[PathBuf], level: i32) -> Resu
     if format == ArchiveFormat::Rar {
         bail!("暂不支持创建 RAR 压缩包");
     }
-    let entries = collect_archive_inputs(files)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     match format {
@@ -506,6 +514,10 @@ fn create_archive_from_files(path: &Path, files: &[PathBuf], level: i32) -> Resu
         }
         ArchiveFormat::Rar => unreachable!(),
     }
+    Ok(temp)
+}
+
+fn persist_archive(temp: tempfile::NamedTempFile, path: &Path) -> Result<()> {
     temp.persist_noclobber(path)
         .map_err(|error| error.error)
         .context("无法创建压缩包（文件可能已存在）")?;
@@ -530,10 +542,18 @@ fn write_tar<W: io::Write>(output: W, entries: Vec<SourceEntry>) -> Result<W> {
     Ok(writer.into_inner()?)
 }
 
-fn compression_target(destination: &Path, name: &str, format: &str) -> Result<PathBuf> {
+fn validate_compression_destination(destination: &Path, format: &str) -> Result<()> {
     if !destination.is_dir() {
         bail!("保存位置不是已有文件夹：{}", destination.display());
     }
+    if !["zip", "7z", "tar", "tar.gz", "tar.bz2", "tar.xz"].contains(&format) {
+        bail!("不支持的压缩格式");
+    }
+    Ok(())
+}
+
+fn compression_target(destination: &Path, name: &str, format: &str) -> Result<PathBuf> {
+    validate_compression_destination(destination, format)?;
     let name = name.trim();
     let mut parts = Path::new(name).components();
     if name.contains(['/', '\\'])
@@ -541,9 +561,6 @@ fn compression_target(destination: &Path, name: &str, format: &str) -> Result<Pa
         || parts.next().is_some()
     {
         bail!("压缩包名称无效");
-    }
-    if !["zip", "7z", "tar", "tar.gz", "tar.bz2", "tar.xz"].contains(&format) {
-        bail!("不支持的压缩格式");
     }
     let lower = name.to_ascii_lowercase();
     let suffix = format!(".{format}");
@@ -562,6 +579,56 @@ fn compression_target(destination: &Path, name: &str, format: &str) -> Result<Pa
         format!("{name}{suffix}")
     };
     Ok(destination.join(name))
+}
+
+fn compress_folders_separately(
+    destination: &Path,
+    sources: &[PathBuf],
+    format: &str,
+    level: i32,
+) -> Result<()> {
+    validate_compression_destination(destination, format)?;
+    if sources.len() < 2 {
+        bail!("请选择至少两个文件夹");
+    }
+
+    let mut jobs = Vec::with_capacity(sources.len());
+    // Collect all inputs before writing temporary archives in the destination.
+    // The destination may be inside one of the selected folders.
+    for source in sources {
+        let metadata = fs::symlink_metadata(source)
+            .with_context(|| format!("无法读取 {}", source.display()))?;
+        if !metadata.is_dir() {
+            bail!("只能分别压缩文件夹：{}", source.display());
+        }
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("文件夹名称无效")?;
+        let path = destination.join(format!("{name}.{format}"));
+        match fs::symlink_metadata(&path) {
+            Ok(_) => bail!("压缩包路径已存在：{}", path.display()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("无法检查 {}", path.display()))
+            }
+        }
+        jobs.push((path, collect_archive_inputs(std::slice::from_ref(source))?));
+    }
+
+    let outputs = jobs
+        .into_iter()
+        .map(|(path, entries)| {
+            let temp = write_archive(&path, entries, level)
+                .with_context(|| format!("无法创建 {}", path.display()))?;
+            Ok((path, temp))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (index, (path, temp)) in outputs.into_iter().enumerate() {
+        persist_archive(temp, &path)
+            .with_context(|| format!("无法保存 {}，已生成 {index} 个压缩包", path.display()))?;
+    }
+    Ok(())
 }
 
 fn add_files(path: &Path, directory: &str, files: &[PathBuf]) -> Result<()> {
@@ -1338,6 +1405,35 @@ mod tests {
             6
         )
         .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn creates_individual_archives_with_full_folder_names() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let first = dir.path().join("报告.zip");
+        let second = dir.path().join("空 文件夹");
+        let destination = second.join("输出");
+        fs::create_dir(&first)?;
+        fs::create_dir_all(&destination)?;
+        fs::write(first.join("内容.txt"), "报告")?;
+        let sources = [first, second];
+        let first_archive = destination.join("报告.zip.tar.gz");
+        let second_archive = destination.join("空 文件夹.tar.gz");
+
+        fs::write(&second_archive, "existing")?;
+        assert!(compress_folders_separately(&destination, &sources, "tar.gz", 6).is_err());
+        assert!(!first_archive.exists());
+        assert_eq!(fs::read_to_string(&second_archive)?, "existing");
+        fs::remove_file(&second_archive)?;
+
+        compress_folders_separately(&destination, &sources, "tar.gz", 6)?;
+        let first = read_archive(&first_archive)?;
+        let second = read_archive(&second_archive)?;
+        assert_eq!(first.directories[""].len(), 1);
+        assert_eq!(first.directories["报告.zip/"][0].name, "内容.txt");
+        assert_eq!(second.directories[""].len(), 1);
+        assert!(second.directories["空 文件夹/输出/"].is_empty());
         Ok(())
     }
 

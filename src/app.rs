@@ -14,6 +14,7 @@ struct View {
     name: String,
     path: String,
     staging: bool,
+    separate_count: usize,
     can_add: bool,
     tree: Vec<Tree>,
     entries: Vec<Row>,
@@ -68,6 +69,15 @@ fn view(a: &ArchiveData, directory: &str) -> View {
         },
         path: a.path.to_string_lossy().into_owned(),
         staging: a.staged_sources.is_some(),
+        separate_count: a
+            .directories
+            .get("")
+            .filter(|entries| {
+                a.staged_sources.is_some()
+                    && entries.len() > 1
+                    && entries.iter().all(|entry| entry.directory)
+            })
+            .map_or(0, Vec::len),
         can_add: a.staged_sources.is_none() && a.format == ArchiveFormat::Zip,
         tree: a
             .tree
@@ -279,14 +289,20 @@ async fn compress(
     name: String,
     format: String,
     level: i32,
-) -> std::result::Result<View, String> {
+    separate: bool,
+) -> std::result::Result<Option<View>, String> {
     job(move || {
         let state = app.state::<State>();
         let a = current(&state)?;
         let sources = a.staged_sources.as_ref().context("没有待压缩文件")?;
-        let path = compression_target(Path::new(&destination), &name, &format)?;
+        let destination = Path::new(&destination);
+        if separate {
+            compress_folders_separately(destination, sources, &format, level)?;
+            return Ok(None);
+        }
+        let path = compression_target(destination, &name, &format)?;
         create_archive_from_files(&path, sources, level)?;
-        Ok(install(&state, read_archive(&path)?, ""))
+        Ok(Some(install(&state, read_archive(&path)?, "")))
     })
     .await
 }
@@ -446,7 +462,24 @@ mod tests {
         assert_eq!(result.folder, "one.txt");
         assert_eq!(Path::new(&result.parent), dir.path());
         assert!(result.staging);
+        assert_eq!(result.separate_count, 0);
         assert!(checked_item(&data, "one.txt").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn offers_separate_compression_only_for_multiple_staged_folders() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let file = dir.path().join("file.txt");
+        fs::create_dir(&first)?;
+        fs::create_dir(&second)?;
+        fs::write(&file, "data")?;
+        let folders = stage_archive_inputs(vec![first.clone(), second])?;
+        let mixed = stage_archive_inputs(vec![first, file])?;
+        assert_eq!(view(&folders, "first/").separate_count, 2);
+        assert_eq!(view(&mixed, "").separate_count, 0);
         Ok(())
     }
 }
